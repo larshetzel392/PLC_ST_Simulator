@@ -1,0 +1,236 @@
+(* ============================================================
+   Unit-Tests für Saege_CODESYS.st  (ohne Anlagenmodell)
+   Prüft die Ablaufkette gemäß SFC (Schritte 1..11) und die
+   Betriebsarten. Sensoren werden direkt im Test gesetzt.
+
+   Syntax:  CYCLE [n];  WAIT T#..;  ASSERT ausdruck [, 'Text'];
+            RUN_UNTIL bedingung [TIMEOUT T#..];  LOG ...;
+   ============================================================ *)
+
+SETUP
+    (* Öffner und Motorschutz im Normalzustand = TRUE *)
+    E9  := TRUE;  E11 := TRUE;
+    mot_schutz_saege := TRUE;  mot_schutz_rolle1 := TRUE;  mot_schutz_rolle2 := TRUE;
+    mot_schutz_anschlag1 := TRUE;  mot_schutz_anschlag2 := TRUE;
+    (* Grundstellung der Mechanik *)
+    E3 := TRUE;  E4 := TRUE;  E6 := TRUE;  E12 := TRUE;
+END_SETUP
+
+
+TEST 'Grundstellung: Schritt 1, alle Ausgänge aus'
+    CYCLE 5;
+    ASSERT SFC_Saege.iStep = 1;
+    ASSERT NOT (SAEGE_RUNTER OR SAEGE_HOCH OR SPANNEN OR ENTSPANNEN OR SAEGE_ANTRIEB
+                OR ROLLE_1 OR ROLLE_2 OR ANSCHLAG1_HOCH OR ANSCHLAG1_RUNTER
+                OR ANSCHLAG2_HOCH OR ANSCHLAG2_RUNTER), 'Ausgang aktiv in Grundstellung';
+END_TEST
+
+
+TEST 'EIN (S8) / AUS (S9, Öffner)'
+    CYCLE;
+    ASSERT fbBetriebsart.xEin = FALSE;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;  CYCLE;
+    ASSERT fbBetriebsart.xEin, 'EIN muss selbsthaltend sein';
+    E9 := FALSE; CYCLE;
+    ASSERT NOT fbBetriebsart.xEin, 'AUS (Öffner) muss ausschalten';
+    E9 := TRUE;  CYCLE;
+    ASSERT NOT fbBetriebsart.xEin, 'nach AUS erst wieder mit EIN';
+END_TEST
+
+
+TEST 'AUS hat Vorrang vor EIN'
+    E8 := TRUE;  E9 := FALSE;  CYCLE;
+    ASSERT NOT fbBetriebsart.xEin;
+END_TEST
+
+
+TEST 'START (S10) nur wenn EIN'
+    E10 := TRUE;  CYCLE;
+    ASSERT NOT fbBetriebsart.xAuto, 'Automatik ohne EIN';
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE; CYCLE;
+    ASSERT fbBetriebsart.xAuto;
+    E11 := FALSE; CYCLE;  E11 := TRUE;
+    ASSERT NOT fbBetriebsart.xAuto, 'STOPP (Öffner) muss Automatik beenden';
+END_TEST
+
+
+TEST 'Motorschutz löst Störung aus und schaltet AUS'
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    ASSERT fbBetriebsart.xEin;
+    mot_schutz_rolle2 := FALSE;  CYCLE;
+    ASSERT fbBetriebsart.xStoerung;
+    ASSERT NOT fbBetriebsart.xEin;
+    E8 := TRUE;  CYCLE;
+    ASSERT NOT fbBetriebsart.xEin, 'EIN darf bei Störung nicht wirken';
+END_TEST
+
+
+TEST 'Kein Start ohne Rohr (E14/E15)'
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    CYCLE 10;
+    ASSERT SFC_Saege.iStep = 1;
+END_TEST
+
+
+TEST 'Kein Start wenn Säge nicht oben (E4)'
+    E4 := FALSE;  E15 := TRUE;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    CYCLE 10;
+    ASSERT SFC_Saege.iStep = 1;
+END_TEST
+
+
+TEST 'Ablauf dünnes Rohr: 4 Schnitte, Schritt 11, zurück zu 1'
+VAR n : INT; END_VAR
+    E15 := TRUE;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    RUN_UNTIL SFC_Saege.iStep = 3 TIMEOUT T#100ms;
+    ASSERT SFC_Saege.xDuenn AND NOT SFC_Saege.xDick;
+    ASSERT SFC_Saege.iSoll = 4;
+
+    FOR n := 1 TO 4 DO
+        (* Schritt 3: Anschlag 1 runter *)
+        ASSERT SFC_Saege.iStep = 3;
+        ASSERT ANSCHLAG1_RUNTER AND NOT ANSCHLAG2_RUNTER;
+        E6 := FALSE;  E7 := TRUE;  CYCLE;
+        (* Schritt 5: Rollenbahnen 1+2 *)
+        ASSERT SFC_Saege.iStep = 5;
+        ASSERT ROLLE_1 AND ROLLE_2 AND NOT ANSCHLAG1_RUNTER;
+        WST_ABTRANSPORT := FALSE;
+        E1 := TRUE;  CYCLE;
+        ASSERT SFC_Saege.iStep = 5, 'dünnes Rohr darf nicht auf E1 (Anschlag 2) reagieren';
+        E1 := FALSE;
+        E0 := TRUE;  CYCLE;
+        (* Schritt 6: spannen *)
+        ASSERT SFC_Saege.iStep = 6;
+        ASSERT SPANNEN AND NOT ROLLE_1;
+        E3 := FALSE;  E2 := TRUE;  CYCLE;
+        (* Schritt 7: Säge an + runter *)
+        ASSERT SFC_Saege.iStep = 7;
+        ASSERT SAEGE_ANTRIEB AND SAEGE_RUNTER AND NOT SPANNEN;
+        E4 := FALSE;  E5 := TRUE;  CYCLE;
+        (* Schritt 8: Säge an + hoch *)
+        ASSERT SFC_Saege.iStep = 8;
+        ASSERT SAEGE_ANTRIEB AND SAEGE_HOCH AND NOT SAEGE_RUNTER;
+        E5 := FALSE;  E4 := TRUE;  CYCLE;
+        (* Schritt 9: entspannen *)
+        ASSERT SFC_Saege.iStep = 9;
+        ASSERT ENTSPANNEN AND NOT SAEGE_ANTRIEB;
+        E2 := FALSE;  E3 := TRUE;  CYCLE;
+        (* Schritt 10: zählen, Anschlag 1 hoch, Abtransport *)
+        ASSERT SFC_Saege.iStep = 10;
+        CYCLE;
+        ASSERT SFC_Saege.iZaehler = n, 'Zähler';
+        ASSERT ANSCHLAG1_HOCH AND NOT ANSCHLAG2_HOCH AND ROLLE_2;
+        E0 := FALSE;  E7 := FALSE;  E6 := TRUE;
+        CYCLE;
+        ASSERT SFC_Saege.iStep = 10, 'ohne B1 kein Weiterschalten';
+        WST_ABTRANSPORT := TRUE;  CYCLE;
+    END_FOR
+
+    (* nach dem 4. Schnitt: Schritt 11 Reststück *)
+    ASSERT SFC_Saege.iStep = 11;
+    CYCLE;
+    ASSERT ROLLE_1 AND ROLLE_2;
+    ASSERT SFC_Saege.iZaehler = 0 AND NOT SFC_Saege.xDuenn;
+    (* B1 ist noch belegt -> erst steigende Flanke schaltet weiter *)
+    CYCLE 5;
+    ASSERT SFC_Saege.iStep = 11, 'Dauersignal B1 darf nicht weiterschalten';
+    WST_ABTRANSPORT := FALSE;  CYCLE;
+    WST_ABTRANSPORT := TRUE;   CYCLE;
+    ASSERT SFC_Saege.iStep = 1;
+END_TEST
+
+
+TEST 'Ablauf dickes Rohr: Anschlag 2, 3 Schnitte'
+VAR n : INT; END_VAR
+    E14 := TRUE;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    RUN_UNTIL SFC_Saege.iStep = 4 TIMEOUT T#100ms;
+    ASSERT SFC_Saege.xDick AND SFC_Saege.iSoll = 3;
+    FOR n := 1 TO 3 DO
+        ASSERT SFC_Saege.iStep = 4;
+        ASSERT ANSCHLAG2_RUNTER AND NOT ANSCHLAG1_RUNTER;
+        E12 := FALSE;  E13 := TRUE;  CYCLE;
+        ASSERT SFC_Saege.iStep = 5;
+        E0 := TRUE;  CYCLE;
+        ASSERT SFC_Saege.iStep = 5, 'dickes Rohr darf nicht auf E0 reagieren';
+        E0 := FALSE;  E1 := TRUE;  CYCLE;
+        E3 := FALSE;  E2 := TRUE;  CYCLE;
+        E4 := FALSE;  E5 := TRUE;  CYCLE;
+        E5 := FALSE;  E4 := TRUE;  CYCLE;
+        E2 := FALSE;  E3 := TRUE;  CYCLE;
+        ASSERT SFC_Saege.iStep = 10;
+        CYCLE;
+        ASSERT ANSCHLAG2_HOCH AND NOT ANSCHLAG1_HOCH;
+        E1 := FALSE;  E13 := FALSE;  E12 := TRUE;
+        WST_ABTRANSPORT := TRUE;  CYCLE;
+        WST_ABTRANSPORT := FALSE;
+    END_FOR
+    ASSERT SFC_Saege.iStep = 11;
+END_TEST
+
+
+TEST 'STOPP: laufendes Rohr wird fertig bearbeitet'
+    E15 := TRUE;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    RUN_UNTIL SFC_Saege.iStep = 3 TIMEOUT T#100ms;
+    E11 := FALSE;  CYCLE;  E11 := TRUE;     (* STOPP gedrückt *)
+    ASSERT NOT fbBetriebsart.xAuto;
+    E6 := FALSE;  E7 := TRUE;  CYCLE;
+    ASSERT SFC_Saege.iStep = 5, 'Kette muss nach STOPP weiterlaufen';
+    ASSERT ROLLE_1;
+END_TEST
+
+
+TEST 'AUS während Ablauf: zurück in Grundstellung, Ausgänge aus'
+    E15 := TRUE;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    RUN_UNTIL SFC_Saege.iStep = 3 TIMEOUT T#100ms;
+    E6 := FALSE;  E7 := TRUE;  CYCLE;
+    ASSERT ROLLE_1;
+    E9 := FALSE;  CYCLE;
+    ASSERT SFC_Saege.iStep = 1;
+    ASSERT NOT ROLLE_1 AND NOT ROLLE_2, 'Ausgänge müssen bei AUS abfallen';
+END_TEST
+
+
+TEST 'Nach Schritt 11 neuer Durchlauf nur mit Automatik'
+    (* Schritt 11 direkt anfahren *)
+    E15 := TRUE;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    SFC_Saege.iStep := 11;  CYCLE;
+    E11 := FALSE;  CYCLE;  E11 := TRUE;     (* Automatik aus *)
+    WST_ABTRANSPORT := TRUE;  CYCLE;
+    ASSERT SFC_Saege.iStep = 1;
+    CYCLE 10;
+    ASSERT SFC_Saege.iStep = 1, 'ohne START kein neuer Zyklus';
+END_TEST
+
+
+TEST 'Schritt 10: B1 noch vom vorherigen Teil belegt darf nicht weiterschalten'
+    (* Liegt das alte Teil/Reststück noch auf B1, wenn Schritt 10 erreicht wird,
+       darf die Kette erst weiter, wenn das NEUE Teil B1 erreicht (Flanke). *)
+    E15 := TRUE;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    RUN_UNTIL SFC_Saege.iStep = 3 TIMEOUT T#100ms;
+    WST_ABTRANSPORT := TRUE;              (* altes Teil liegt dauerhaft auf B1 *)
+    E6 := FALSE;  E7 := TRUE;  CYCLE;
+    E0 := TRUE;   CYCLE;
+    E3 := FALSE;  E2 := TRUE;  CYCLE;
+    E4 := FALSE;  E5 := TRUE;  CYCLE;
+    E5 := FALSE;  E4 := TRUE;  CYCLE;
+    E2 := FALSE;  E3 := TRUE;  CYCLE;
+    ASSERT SFC_Saege.iStep = 10;
+    E0 := FALSE;  E7 := FALSE;  E6 := TRUE;     (* Anschlag 1 wieder oben *)
+    CYCLE 3;
+    ASSERT SFC_Saege.iStep = 10, 'Kette schaltet mit altem Teil auf B1 weiter – Anschlag 1 würde auf das neue Teil fahren';
+END_TEST

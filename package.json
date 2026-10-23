@@ -1,0 +1,12 @@
+{
+  "name": "st-pruefstand",
+  "version": "1.0.0",
+  "description": "SPS-Simulator und Testumgebung für IEC 61131-3 Structured Text (CODESYS-Dialekt)",
+  "private": true,
+  "bin": { "st-test": "st-test.js" },
+  "scripts": {
+    "start": "node serve.js",
+    "build": "node build.js",
+    "test": "node st-test.js examples/selftest/features.st examples/selftest/features.sttest; node st-test.js Saege_CODESYS.st Saege_Tests.sttest; node st-test.js Saege_CODESYS.st --model Saege_Anlage.st Saege_Integration.sttest"
+  }
+}

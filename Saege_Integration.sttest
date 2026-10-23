@@ -1,0 +1,69 @@
+(* ============================================================
+   Integrationstests: Saege_CODESYS.st + Anlagenmodell Saege_Anlage.st
+   Die Sensoren kommen hier aus dem Modell (SIM_Saege).
+   CLI:  node st-test.js Saege_CODESYS.st --model Saege_Anlage.st Saege_Integration.sttest
+   ============================================================ *)
+
+TEST 'Dünnes Rohr: 4 Teile à 300 mm, Reststück, Grundstellung'
+    SIM_Saege.xNaechstesDick := FALSE;
+    WAIT T#1100ms;                       (* Rohr wird aufgelegt *)
+    ASSERT E15 AND NOT E14;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    E11 := FALSE; CYCLE; E11 := TRUE;    (* STOPP: nur dieses eine Rohr *)
+    RUN_UNTIL SFC_Saege.iStep = 11 TIMEOUT T#60s;
+    ASSERT SIM_Saege.iSchnitte = 4;
+    RUN_UNTIL SFC_Saege.iStep = 1 TIMEOUT T#10s;
+    ASSERT NOT SIM_Saege.xKollision, SIM_Saege.sKollision;
+    LOG 'Rohr fertig nach', TIME();
+END_TEST
+
+
+TEST 'Dickes Rohr: 3 Teile à 500 mm über Anschlag 2'
+    SIM_Saege.xNaechstesDick := TRUE;
+    WAIT T#1100ms;
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    E11 := FALSE; CYCLE; E11 := TRUE;
+    RUN_UNTIL SFC_Saege.iStep = 4 TIMEOUT T#1s;
+    RUN_UNTIL SFC_Saege.iStep = 11 TIMEOUT T#60s;
+    ASSERT SIM_Saege.iSchnitte = 3;
+    RUN_UNTIL SFC_Saege.iStep = 1 TIMEOUT T#10s;
+    ASSERT NOT SIM_Saege.xKollision, SIM_Saege.sKollision;
+END_TEST
+
+
+TEST 'Dauerbetrieb: 3 dünne Rohre ohne Kollision'
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    WAIT T#1100ms;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    RUN_UNTIL SIM_Saege.iSchnitte = 12 OR SIM_Saege.xKollision TIMEOUT T#3m;
+    ASSERT NOT SIM_Saege.xKollision, SIM_Saege.sKollision;
+    LOG 'Zeit für 12 Schnitte:', TIME(), ' Rohre:', SIM_Saege.iRohre;
+END_TEST
+
+
+TEST 'Säge läuft nur, wenn das Rohr gespannt ist'
+VAR n : DINT; END_VAR
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    WAIT T#1100ms;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    FOR n := 1 TO 6000 DO          (* 60 s Zyklus für Zyklus überwachen *)
+        CYCLE;
+        ASSERT NOT SAEGE_ANTRIEB OR E2, 'Sägeantrieb ohne gespanntes Rohr';
+        ASSERT NOT (ROLLE_1 AND SPANNEN), 'Vorschub während Spannen';
+        ASSERT NOT (SAEGE_RUNTER AND SAEGE_HOCH);
+    END_FOR
+END_TEST
+
+
+TEST 'AUS mitten im Sägen: alles stoppt sofort'
+    E8 := TRUE;  CYCLE;  E8 := FALSE;
+    WAIT T#1100ms;
+    E10 := TRUE; CYCLE;  E10 := FALSE;
+    RUN_UNTIL SFC_Saege.iStep = 7 TIMEOUT T#20s;
+    WAIT T#300ms;
+    E9 := FALSE;  CYCLE;
+    ASSERT NOT (SAEGE_ANTRIEB OR SAEGE_RUNTER OR ROLLE_1 OR ROLLE_2);
+    ASSERT SFC_Saege.iStep = 1;
+END_TEST

@@ -1,0 +1,44 @@
+TEST 'Arithmetik und Typen'
+  CYCLE;
+  ASSERT PLC_PRG.sum = 1 + 2 + 7 + 7;  (* i=4 per CONTINUE übersprungen *)
+  ASSERT PLC_PRG.overflow = -32768, 'INT-Überlauf';
+  ASSERT PLC_PRG.r = 3.5;
+  ASSERT PLC_PRG.div = 3;
+  ASSERT PLC_PRG.res = 103 + 3;
+  ASSERT PLC_PRG.s = 'abcdef';
+  ASSERT PLC_PRG.bits = 9;
+  ASSERT gW = 16#F1;
+  ASSERT PLC_PRG.m2[2,1] = 42;
+  ASSERT gMode = E_Mode.RUN;
+  ASSERT gMode = RUN;
+  ASSERT PLC_PRG.p.y = 4.5;
+  ASSERT PLC_PRG.i = 103;
+END_TEST
+
+TEST 'Timer und Flanken'
+  gIn := TRUE;
+  CYCLE;
+  ASSERT gCnt = 1;
+  ASSERT ton1.Q = FALSE;
+  WAIT T#990ms;
+  ASSERT ton1.Q = FALSE;
+  CYCLE;
+  ASSERT ton1.Q;
+  ASSERT gCnt = 1;
+  ASSERT PLC_PRG.i = 103;
+  gIn := FALSE; CYCLE; gIn := TRUE; CYCLE; gIn := FALSE; CYCLE; gIn := TRUE; CYCLE;
+  ASSERT ctu1.Q AND ctu1.CV = 3;
+END_TEST
+
+TEST 'Blinker'
+VAR n : INT; last : BOOL; END_VAR
+  gIn := TRUE;
+  FOR n := 1 TO 100 DO
+    CYCLE;
+    IF blink.q <> last THEN sum := sum + 1; END_IF
+    last := blink.q;
+  END_FOR
+  LOG 'Flanken', n;
+  RUN_UNTIL blink.q TIMEOUT T#500ms;
+END_TEST
+
