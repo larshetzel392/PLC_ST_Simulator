@@ -185,6 +185,17 @@ code { font-family: var(--font-code); font-size: 0.92em; }
 .diags .k.error { color: var(--bad); } .diags .k.warning { color: var(--warn); } .diags .k.info { color: var(--ok); }
 .diags .where { font-family: var(--font-code); font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diags .msg { grid-column: 1 / 3; min-width: 0; word-break: break-word; line-height: 1.4; }
+.diags li { position: relative; padding-right: 34px; }
+.diags .del {
+  position: absolute; right: 8px; top: 6px; width: 22px; height: 22px; border: 0; border-radius: 3px;
+  background: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1;
+}
+.diags .del:hover { background: var(--line); color: var(--ink); }
+.diag-tools {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; justify-content: flex-end;
+  padding: 6px 12px; background: var(--surface); border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted);
+}
+.diag-tools span { margin-right: auto; }
 
 /* ---------- Ablaufplan ---------- */
 .chart-head {
@@ -456,7 +467,14 @@ details.pblock[open] summary { margin-bottom: 8px; }
           <button class="tab" role="tab" data-side="diags" aria-selected="true">Meldungen <span class="count" id="cntDiags" hidden></span></button>
           <button class="tab" role="tab" data-side="help" aria-selected="false">Hilfe</button>
         </div>
-        <div class="view" id="side-diags"><div class="scroll"><ul class="diags" id="diagList"></ul></div></div>
+        <div class="view" id="side-diags"><div class="scroll">
+          <div class="diag-tools" id="diagTools" hidden>
+            <span id="diagHidden"></span>
+            <button class="btn small" id="btnDiagRestore" hidden title="Gelöschte Warnungen wieder anzeigen">Wiederherstellen</button>
+            <button class="btn small" id="btnDiagClear" title="Alle Meldungen aus der Liste löschen">Alle löschen</button>
+          </div>
+          <ul class="diags" id="diagList"></ul>
+        </div></div>
         <div class="view" id="side-help" hidden><div class="scroll"><div class="help" id="helpBox"></div></div></div>
       </aside>
     </section>
@@ -3860,6 +3878,7 @@ details.pblock[open] summary { margin-bottom: 8px; }
   }
 
   function liveCheck() {
+    dismissedErr.clear();
     let plc;
     try { plc = new ST.PLC(sources(), { cycleMs: cycleMs() }); }
     catch (e) { console.error(e); return null; }
@@ -3871,9 +3890,28 @@ details.pblock[open] summary { margin-bottom: 8px; }
     return plc;
   }
 
+  // Gelöschte Meldungen: Warnungen bleiben weg (Schlüssel ohne Zeile, damit sie beim Tippen nicht zurückkommen),
+  // Fehler nur bis zur nächsten Prüfung
+  const dismissed = new Set(store.get('dismissed', []));
+  const dismissedErr = new Set();
+  const diagKey = d => `${d.file}|${d.kind}|${d.msg}`;
+  function isDismissed(d) { const k = diagKey(d); return d.kind === 'error' ? dismissedErr.has(k) : dismissed.has(k); }
+  function dismiss(list) {
+    for (const d of list) (d.kind === 'error' ? dismissedErr : dismissed).add(diagKey(d));
+    store.set('dismissed', [...dismissed]);
+    showDiagnostics(state.compileDiags, state.testDiags);
+  }
+
   function showDiagnostics(cdiags, tdiags) {
     state.compileDiags = cdiags; state.testDiags = tdiags;
-    const all = cdiags.concat(tdiags);
+    const raw = cdiags.concat(tdiags);
+    const all = raw.filter(d => !isDismissed(d));
+    const hiddenWarn = raw.filter(d => d.kind !== 'error' && isDismissed(d)).length;
+    const hiddenErr = raw.length - all.length - hiddenWarn;
+    $('diagTools').hidden = !raw.length;
+    $('diagHidden').textContent = (hiddenWarn || hiddenErr) ? `${hiddenWarn + hiddenErr} gelöscht` : '';
+    $('btnDiagRestore').hidden = !dismissed.size && !dismissedErr.size;
+    $('btnDiagClear').hidden = !all.length;
     const of = f => all.filter(d => d.file === f);
     eds.prog.setDiagnostics(of(FILES.prog));
     eds.model.setDiagnostics(of(FILES.model));
@@ -3895,13 +3933,21 @@ details.pblock[open] summary { margin-bottom: 8px; }
     const ul = $('diagList');
     ul.innerHTML = '';
     if (!all.length) {
-      ul.innerHTML = '<li style="cursor:default"><span class="k info">OK</span><span class="where"></span><span class="msg">Keine Fehler oder Warnungen.</span></li>';
+      ul.innerHTML = raw.length
+        ? '<li style="cursor:default"><span class="k info">Leer</span><span class="where"></span><span class="msg">Alle Meldungen gelöscht.</span></li>'
+        : '<li style="cursor:default"><span class="k info">OK</span><span class="where"></span><span class="msg">Keine Fehler oder Warnungen.</span></li>';
       return;
     }
     const sorted = all.slice().sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'error' ? -1 : 1));
     for (const d of sorted) {
       const li = document.createElement('li');
       li.innerHTML = `<span class="k ${d.kind}">${d.kind === 'error' ? 'Fehler' : 'Warnung'}</span><span class="where">${esc(d.file || '')}${d.line ? ':' + d.line : ''}</span><span class="msg">${esc(d.msg)}</span>`;
+      const del = document.createElement('button');
+      del.className = 'del'; del.textContent = '×';
+      del.title = d.kind === 'error' ? 'Löschen (kommt wieder, solange der Fehler im Code besteht)' : 'Warnung löschen';
+      del.setAttribute('aria-label', 'Meldung löschen');
+      del.addEventListener('click', e => { e.stopPropagation(); dismiss([d]); });
+      li.append(del);
       li.addEventListener('click', () => jumpTo(d.file, d.line, d.col));
       ul.append(li);
     }
@@ -4882,6 +4928,14 @@ details.pblock[open] summary { margin-bottom: 8px; }
   }
 
   // ---------- Bedienung ----------
+  $('btnDiagClear').addEventListener('click', () => {
+    dismiss(state.compileDiags.concat(state.testDiags).filter(d => !isDismissed(d)));
+    status('Meldungen gelöscht. Fehler erscheinen wieder, solange sie im Code bestehen.');
+  });
+  $('btnDiagRestore').addEventListener('click', () => {
+    dismissed.clear(); dismissedErr.clear(); store.set('dismissed', []);
+    showDiagnostics(state.compileDiags, state.testDiags);
+  });
   $('btnCompile').addEventListener('click', () => compile());
   $('btnRun').addEventListener('click', run);
   $('btnStop').addEventListener('click', stop);

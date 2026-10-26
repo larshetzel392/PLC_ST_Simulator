@@ -174,6 +174,17 @@ code { font-family: var(--font-code); font-size: 0.92em; }
 .diags .k.error { color: var(--bad); } .diags .k.warning { color: var(--warn); } .diags .k.info { color: var(--ok); }
 .diags .where { font-family: var(--font-code); font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diags .msg { grid-column: 1 / 3; min-width: 0; word-break: break-word; line-height: 1.4; }
+.diags li { position: relative; padding-right: 34px; }
+.diags .del {
+  position: absolute; right: 8px; top: 6px; width: 22px; height: 22px; border: 0; border-radius: 3px;
+  background: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1;
+}
+.diags .del:hover { background: var(--line); color: var(--ink); }
+.diag-tools {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; justify-content: flex-end;
+  padding: 6px 12px; background: var(--surface); border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted);
+}
+.diag-tools span { margin-right: auto; }
 
 /* ---------- Ablaufplan ---------- */
 .chart-head {

@@ -208,6 +208,7 @@
   }
 
   function liveCheck() {
+    dismissedErr.clear();
     let plc;
     try { plc = new ST.PLC(sources(), { cycleMs: cycleMs() }); }
     catch (e) { console.error(e); return null; }
@@ -219,9 +220,28 @@
     return plc;
   }
 
+  // Gelöschte Meldungen: Warnungen bleiben weg (Schlüssel ohne Zeile, damit sie beim Tippen nicht zurückkommen),
+  // Fehler nur bis zur nächsten Prüfung
+  const dismissed = new Set(store.get('dismissed', []));
+  const dismissedErr = new Set();
+  const diagKey = d => `${d.file}|${d.kind}|${d.msg}`;
+  function isDismissed(d) { const k = diagKey(d); return d.kind === 'error' ? dismissedErr.has(k) : dismissed.has(k); }
+  function dismiss(list) {
+    for (const d of list) (d.kind === 'error' ? dismissedErr : dismissed).add(diagKey(d));
+    store.set('dismissed', [...dismissed]);
+    showDiagnostics(state.compileDiags, state.testDiags);
+  }
+
   function showDiagnostics(cdiags, tdiags) {
     state.compileDiags = cdiags; state.testDiags = tdiags;
-    const all = cdiags.concat(tdiags);
+    const raw = cdiags.concat(tdiags);
+    const all = raw.filter(d => !isDismissed(d));
+    const hiddenWarn = raw.filter(d => d.kind !== 'error' && isDismissed(d)).length;
+    const hiddenErr = raw.length - all.length - hiddenWarn;
+    $('diagTools').hidden = !raw.length;
+    $('diagHidden').textContent = (hiddenWarn || hiddenErr) ? `${hiddenWarn + hiddenErr} gelöscht` : '';
+    $('btnDiagRestore').hidden = !dismissed.size && !dismissedErr.size;
+    $('btnDiagClear').hidden = !all.length;
     const of = f => all.filter(d => d.file === f);
     eds.prog.setDiagnostics(of(FILES.prog));
     eds.model.setDiagnostics(of(FILES.model));
@@ -243,13 +263,21 @@
     const ul = $('diagList');
     ul.innerHTML = '';
     if (!all.length) {
-      ul.innerHTML = '<li style="cursor:default"><span class="k info">OK</span><span class="where"></span><span class="msg">Keine Fehler oder Warnungen.</span></li>';
+      ul.innerHTML = raw.length
+        ? '<li style="cursor:default"><span class="k info">Leer</span><span class="where"></span><span class="msg">Alle Meldungen gelöscht.</span></li>'
+        : '<li style="cursor:default"><span class="k info">OK</span><span class="where"></span><span class="msg">Keine Fehler oder Warnungen.</span></li>';
       return;
     }
     const sorted = all.slice().sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'error' ? -1 : 1));
     for (const d of sorted) {
       const li = document.createElement('li');
       li.innerHTML = `<span class="k ${d.kind}">${d.kind === 'error' ? 'Fehler' : 'Warnung'}</span><span class="where">${esc(d.file || '')}${d.line ? ':' + d.line : ''}</span><span class="msg">${esc(d.msg)}</span>`;
+      const del = document.createElement('button');
+      del.className = 'del'; del.textContent = '×';
+      del.title = d.kind === 'error' ? 'Löschen (kommt wieder, solange der Fehler im Code besteht)' : 'Warnung löschen';
+      del.setAttribute('aria-label', 'Meldung löschen');
+      del.addEventListener('click', e => { e.stopPropagation(); dismiss([d]); });
+      li.append(del);
       li.addEventListener('click', () => jumpTo(d.file, d.line, d.col));
       ul.append(li);
     }
@@ -1230,6 +1258,14 @@
   }
 
   // ---------- Bedienung ----------
+  $('btnDiagClear').addEventListener('click', () => {
+    dismiss(state.compileDiags.concat(state.testDiags).filter(d => !isDismissed(d)));
+    status('Meldungen gelöscht. Fehler erscheinen wieder, solange sie im Code bestehen.');
+  });
+  $('btnDiagRestore').addEventListener('click', () => {
+    dismissed.clear(); dismissedErr.clear(); store.set('dismissed', []);
+    showDiagnostics(state.compileDiags, state.testDiags);
+  });
   $('btnCompile').addEventListener('click', () => compile());
   $('btnRun').addEventListener('click', run);
   $('btnStop').addEventListener('click', stop);

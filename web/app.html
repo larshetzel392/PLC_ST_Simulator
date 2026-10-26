@@ -62,7 +62,14 @@
           <button class="tab" role="tab" data-side="diags" aria-selected="true">Meldungen <span class="count" id="cntDiags" hidden></span></button>
           <button class="tab" role="tab" data-side="help" aria-selected="false">Hilfe</button>
         </div>
-        <div class="view" id="side-diags"><div class="scroll"><ul class="diags" id="diagList"></ul></div></div>
+        <div class="view" id="side-diags"><div class="scroll">
+          <div class="diag-tools" id="diagTools" hidden>
+            <span id="diagHidden"></span>
+            <button class="btn small" id="btnDiagRestore" hidden title="Gelöschte Warnungen wieder anzeigen">Wiederherstellen</button>
+            <button class="btn small" id="btnDiagClear" title="Alle Meldungen aus der Liste löschen">Alle löschen</button>
+          </div>
+          <ul class="diags" id="diagList"></ul>
+        </div></div>
         <div class="view" id="side-help" hidden><div class="scroll"><div class="help" id="helpBox"></div></div></div>
       </aside>
     </section>
