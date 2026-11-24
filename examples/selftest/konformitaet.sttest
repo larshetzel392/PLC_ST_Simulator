@@ -1,0 +1,165 @@
+TEST 'Ganzzahl-Überlauf und Typen'
+    PLC_PRG.i := 32767; PLC_PRG.i := PLC_PRG.i + 1;
+    ASSERT PLC_PRG.i = -32768, 'INT läuft über';
+    PLC_PRG.si := 127; PLC_PRG.si := PLC_PRG.si + 1;
+    ASSERT PLC_PRG.si = -128, 'SINT';
+    PLC_PRG.usi := 0; PLC_PRG.usi := PLC_PRG.usi - 1;
+    ASSERT PLC_PRG.usi = 255, 'USINT unter 0';
+    PLC_PRG.ui := 65535; PLC_PRG.ui := PLC_PRG.ui + 2;
+    ASSERT PLC_PRG.ui = 1, 'UINT';
+    PLC_PRG.di := 2147483647; PLC_PRG.di := PLC_PRG.di + 1;
+    ASSERT PLC_PRG.di = -2147483648, 'DINT';
+    PLC_PRG.ud := 0; PLC_PRG.ud := PLC_PRG.ud - 1;
+    ASSERT PLC_PRG.ud = 4294967295, 'UDINT';
+    PLC_PRG.b := 16#F0; PLC_PRG.b := PLC_PRG.b + 16#20;
+    ASSERT PLC_PRG.b = 16#10, 'BYTE';
+END_TEST
+
+TEST 'Division, MOD, Rundung'
+    PLC_PRG.i := 7 / 2;      ASSERT PLC_PRG.i = 3;
+    PLC_PRG.i := -7 / 2;     ASSERT PLC_PRG.i = -3, 'Ganzzahldivision schneidet ab';
+    PLC_PRG.i := -7 MOD 3;   ASSERT PLC_PRG.i = -1, 'MOD mit Vorzeichen des Dividenden';
+    PLC_PRG.i := 7 MOD -3;   ASSERT PLC_PRG.i = 1;
+    PLC_PRG.r := 7 / 2;      ASSERT PLC_PRG.r = 3.0, 'INT-Division vor Zuweisung an REAL';
+    PLC_PRG.r := 7.0 / 2;    ASSERT PLC_PRG.r = 3.5;
+    PLC_PRG.i := REAL_TO_INT(2.5);  ASSERT PLC_PRG.i = 3, 'kaufmännisch gerundet';
+    PLC_PRG.i := REAL_TO_INT(3.5);  ASSERT PLC_PRG.i = 4;
+    PLC_PRG.i := REAL_TO_INT(-2.5); ASSERT PLC_PRG.i = -3;
+    PLC_PRG.i := TRUNC(-2.7);       ASSERT PLC_PRG.i = -2;
+    PLC_PRG.di := REAL_TO_DINT(1.0E6); ASSERT PLC_PRG.di = 1000000;
+    PLC_PRG.i := 2 ** 3;  ASSERT PLC_PRG.i = 8;
+    PLC_PRG.i := 2 + 3 * 4 - 1; ASSERT PLC_PRG.i = 13;
+    PLC_PRG.x := NOT 3 > 2 OR TRUE; ASSERT PLC_PRG.x;
+END_TEST
+
+TEST 'Bits und Bitoperationen'
+    PLC_PRG.w := 16#00FF;
+    ASSERT SHL(PLC_PRG.w, 4) = 16#0FF0;
+    ASSERT SHR(PLC_PRG.w, 4) = 16#000F;
+    ASSERT ROL(PLC_PRG.w, 8) = 16#FF00;
+    ASSERT ROR(BYTE#16#01, 1) = 16#80, 'ROR BYTE';
+    ASSERT (PLC_PRG.w AND 16#0F0F) = 16#000F;
+    ASSERT (PLC_PRG.w XOR 16#FFFF) = 16#FF00;
+    PLC_PRG.w := NOT PLC_PRG.w; ASSERT PLC_PRG.w = 16#FF00, 'NOT WORD';
+    PLC_PRG.dw := 0; PLC_PRG.dw.31 := TRUE; ASSERT PLC_PRG.dw = 16#80000000, 'Bit 31 setzen';
+    PLC_PRG.dw.31 := FALSE; PLC_PRG.dw.0 := TRUE; ASSERT PLC_PRG.dw = 1;
+    PLC_PRG.x := PLC_PRG.w.8; ASSERT PLC_PRG.x;
+    PLC_PRG.x := PLC_PRG.w.7; ASSERT NOT PLC_PRG.x;
+    PLC_PRG.i := -1; ASSERT PLC_PRG.i.15, 'Vorzeichenbit';
+END_TEST
+
+TEST 'REAL und Mathe'
+    PLC_PRG.r := 0.1 + 0.2;
+    ASSERT ABS(PLC_PRG.r - 0.3) < 1.0E-6;
+    PLC_PRG.lr := SQRT(16.0); ASSERT PLC_PRG.lr = 4.0;
+    PLC_PRG.lr := EXPT(2.0, 10); ASSERT PLC_PRG.lr = 1024.0;
+    PLC_PRG.r := INT_TO_REAL(3) / 4; ASSERT PLC_PRG.r = 0.75;
+    PLC_PRG.r := MAX(1.5, 2.5, 0.5); ASSERT PLC_PRG.r = 2.5;
+    PLC_PRG.i := LIMIT(0, 150, 100); ASSERT PLC_PRG.i = 100;
+    PLC_PRG.i := MUX(2, 10, 20, 30); ASSERT PLC_PRG.i = 30;
+    PLC_PRG.i := ABS(-5); ASSERT PLC_PRG.i = 5;
+    PLC_PRG.r := 1.0E38 * 10.0;
+    LOG 'REAL-Überlauf:', PLC_PRG.r;
+END_TEST
+
+TEST 'TIME'
+    PLC_PRG.t := T#1s + T#500ms; ASSERT PLC_PRG.t = T#1500ms;
+    PLC_PRG.t := T#1m / 4;       ASSERT PLC_PRG.t = T#15s;
+    PLC_PRG.t := T#2s * 3;       ASSERT PLC_PRG.t = T#6s;
+    PLC_PRG.di := TIME_TO_DINT(T#1h); ASSERT PLC_PRG.di = 3600000;
+    PLC_PRG.t := DINT_TO_TIME(250); ASSERT PLC_PRG.t = T#250ms;
+    ASSERT T#1d2h = T#26h;
+    ASSERT T#1.5s = T#1500ms;
+END_TEST
+
+TEST 'Strings'
+    PLC_PRG.s := 'Hallo';
+    ASSERT LEN(PLC_PRG.s) = 5;
+    ASSERT CONCAT(PLC_PRG.s, ' Welt') = 'Hallo Welt';
+    ASSERT LEFT(PLC_PRG.s, 2) = 'Ha';
+    ASSERT RIGHT(PLC_PRG.s, 3) = 'llo';
+    ASSERT MID(PLC_PRG.s, 3, 2) = 'all', 'MID(STR, LEN, POS)';
+    ASSERT FIND(PLC_PRG.s, 'll') = 3;
+    ASSERT INSERT('abef', 'cd', 2) = 'abcdef';
+    ASSERT DELETE('abcdef', 2, 3) = 'abef';
+    ASSERT REPLACE('abcdef', 'XY', 2, 3) = 'abXYef';
+    PLC_PRG.s5 := 'abcdefgh'; ASSERT PLC_PRG.s5 = 'abcde', 'STRING(5) kürzt';
+    ASSERT INT_TO_STRING(-42) = '-42';
+    ASSERT STRING_TO_INT('123') = 123;
+    ASSERT REAL_TO_STRING(1.5) = '1.5';
+    ASSERT BOOL_TO_STRING(TRUE) = 'TRUE';
+    ASSERT 'abc' < 'abd';
+    PLC_PRG.s := 'It$'s $$5';
+    ASSERT LEN(PLC_PRG.s) = 7, 'Escape';
+END_TEST
+
+TEST 'Kopiersemantik'
+    PLC_PRG.p1.x := 1; PLC_PRG.p1.a[0] := 5;
+    PLC_PRG.p2 := PLC_PRG.p1;
+    PLC_PRG.p1.x := 99; PLC_PRG.p1.a[0] := 99;
+    ASSERT PLC_PRG.p2.x = 1, 'Struct wird kopiert';
+    ASSERT PLC_PRG.p2.a[0] = 5, 'auch das Array im Struct';
+    PLC_PRG.a1[1] := 7;
+    PLC_PRG.a2 := PLC_PRG.a1;
+    PLC_PRG.a1[1] := 8;
+    ASSERT PLC_PRG.a2[1] = 7, 'Array wird kopiert';
+    PLC_PRG.m[2, 3] := 42; ASSERT PLC_PRG.m[2, 3] = 42;
+    ASSERT PLC_PRG.m[1, 3] = 0, '2D-Array';
+END_TEST
+
+TEST 'Funktionen und FBs'
+    PLC_PRG.o := F_Out(a := 4, doppelt => PLC_PRG.k);
+    ASSERT PLC_PRG.o = 1, 'Funktionsvariablen starten neu';
+    ASSERT PLC_PRG.k = 8, 'VAR_OUTPUT der Funktion';
+    PLC_PRG.o := F_Out(4);
+    ASSERT PLC_PRG.o = 1;
+    ASSERT F_Early(5) = 1, 'RETURN in Funktion';
+    ASSERT F_Early(-5) = 2;
+    PLC_PRG.fm(inc := 2); PLC_PRG.fm(inc := 3);
+    ASSERT PLC_PRG.fm.sum = 51, 'FB behält n, TEMP neu';
+    PLC_PRG.fm2(inc := 1);
+    ASSERT PLC_PRG.fm2.sum = 11, 'Instanzen getrennt';
+    PLC_PRG.o := 1; PLC_PRG.k := 2;
+    PLC_PRG.sw(a := PLC_PRG.o, b := PLC_PRG.k);
+    ASSERT PLC_PRG.o = 2 AND PLC_PRG.k = 1, 'VAR_IN_OUT tauscht';
+    PLC_PRG.fm();
+    ASSERT PLC_PRG.fm.sum = 81, 'Aufruf ohne Parameter behält Eingang inc=3';
+END_TEST
+
+TEST 'Schleifen'
+VAR j : INT; END_VAR
+    PLC_PRG.n := 0;
+    FOR j := 10 TO 1 BY -3 DO PLC_PRG.n := PLC_PRG.n + 1; END_FOR
+    ASSERT PLC_PRG.n = 4, '10,7,4,1';
+    ASSERT j = -2, 'Laufvariable nach Ende';
+    PLC_PRG.n := 0;
+    FOR j := 1 TO 10 DO
+        IF j = 3 THEN CONTINUE; END_IF
+        IF j = 6 THEN EXIT; END_IF
+        PLC_PRG.n := PLC_PRG.n + j;
+    END_FOR
+    ASSERT PLC_PRG.n = 1 + 2 + 4 + 5, 'CONTINUE/EXIT';
+    PLC_PRG.n := 0;
+    WHILE PLC_PRG.n < 5 DO PLC_PRG.n := PLC_PRG.n + 2; END_WHILE
+    ASSERT PLC_PRG.n = 6;
+    REPEAT PLC_PRG.n := PLC_PRG.n - 1; UNTIL PLC_PRG.n <= 0 END_REPEAT
+    ASSERT PLC_PRG.n = 0;
+    PLC_PRG.n := 0;
+    FOR j := 5 TO 1 DO PLC_PRG.n := 1; END_FOR
+    ASSERT PLC_PRG.n = 0, 'leere Schleife';
+END_TEST
+
+TEST 'CASE und Aufzählungen'
+    PLC_PRG.c := E_C.BLAU;
+    ASSERT PLC_PRG.c = E_C.BLAU;
+    ASSERT E_C#GRUEN = 2;
+    PLC_PRG.n := 0;
+    CASE PLC_PRG.c OF
+        E_C.ROT, E_C.GRUEN: PLC_PRG.n := 1;
+        E_C.BLAU: PLC_PRG.n := 2;
+    ELSE PLC_PRG.n := 3;
+    END_CASE
+    ASSERT PLC_PRG.n = 2;
+    CASE 7 OF 1..5: PLC_PRG.n := 10; 6..9: PLC_PRG.n := 20; END_CASE
+    ASSERT PLC_PRG.n = 20;
+END_TEST

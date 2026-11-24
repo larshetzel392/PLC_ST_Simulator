@@ -168,7 +168,7 @@
       if (isNum(t) && isNum(x)) t = arithType(t, x);
       else if (!(typeName(t) === typeName(x) || (isTime(t) && isTime(x)) || (isStr(t) && isStr(x)))) throw `inkompatible Argumente ${typeName(t)} / ${typeName(x)}`;
     }
-    return t.lit ? (t.cat === 'int' ? ELEM.DINT : ELEM.LREAL) : t;
+    return t; // nur Literale → bleibt Literal-Typ, passt dann ohne Warnung an jedes Ziel
   };
   fn('MIN', cmpSig, v => v.reduce((a, b) => (b < a ? b : a)), 2, 99);
   fn('MAX', cmpSig, v => v.reduce((a, b) => (b > a ? b : a)), 2, 99);

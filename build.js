@@ -12,10 +12,20 @@ const examples = [
     files: { prog: 'Saege_CODESYS.st', model: 'Saege_Anlage.st', tests: 'Saege_Tests.sttest' } },
   { name: 'Säge – mit Anlagenmodell (Integrationstests)', prog: rd('Saege_CODESYS.st'), model: rd('Saege_Anlage.st'), tests: rd('Saege_Integration.sttest'), modelOn: true,
     files: { prog: 'Saege_CODESYS.st', model: 'Saege_Anlage.st', tests: 'Saege_Integration.sttest' } },
+  { name: 'Autowaschanlage – Kette mit Störung und Wiederholung', prog: rd('examples/allgemein/Waschanlage.st'), model: '', tests: rd('examples/allgemein/Waschanlage.sttest'), modelOn: false,
+    files: { prog: 'examples/allgemein/Waschanlage.st', model: 'anlage.st', tests: 'examples/allgemein/Waschanlage.sttest' } },
+  { name: 'Ampel – Aufzählung als Zustand', prog: rd('examples/allgemein/Ampel.st'), model: '', tests: '', modelOn: false,
+    files: { prog: 'examples/allgemein/Ampel.st', model: 'anlage.st', tests: 'tests.sttest' } },
+  { name: 'Zwei Stationen – Schrittkette im FB (IF/ELSIF)', prog: rd('examples/allgemein/Station.st'), model: '', tests: rd('examples/allgemein/Station.sttest'), modelOn: false,
+    files: { prog: 'examples/allgemein/Station.st', model: 'anlage.st', tests: 'examples/allgemein/Station.sttest' } },
+  { name: 'Schrittmerker – BOOL-Schrittkette', prog: rd('examples/allgemein/Schrittmerker.st'), model: '', tests: '', modelOn: false,
+    files: { prog: 'examples/allgemein/Schrittmerker.st', model: 'anlage.st', tests: 'tests.sttest' } },
+  { name: 'OOP: METHOD, ACTION, EXTENDS (Selbsttest)', prog: rd('examples/selftest/oop.st'), model: '', tests: rd('examples/selftest/oop.sttest'), modelOn: false,
+    files: { prog: 'examples/selftest/oop.st', model: 'anlage.st', tests: 'examples/selftest/oop.sttest' } },
   { name: 'Sprachumfang (Selbsttest)', prog: rd('examples/selftest/features.st'), model: '', tests: rd('examples/selftest/features.sttest'), modelOn: false,
     files: { prog: 'features.st', model: 'anlage.st', tests: 'features.sttest' } },
 ];
-const engine = ['lexer', 'parser', 'types', 'compiler', 'codegen', 'runtime', 'sfc'].map(n => rd(`src/${n}.js`)).join('\n');
+const engine = ['lexer', 'parser', 'types', 'compiler', 'infer', 'codegen', 'runtime', 'sfc'].map(n => rd(`src/${n}.js`)).join('\n');
 const js = engine + '\n;globalThis.ST_EXAMPLES = ' + JSON.stringify(examples).replace(/<\//g, '<\\/') + ';\n' + rd('web/app.js');
 
 const head = `<title>ST Prüfstand</title>

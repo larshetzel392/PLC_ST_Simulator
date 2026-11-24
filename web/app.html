@@ -1,4 +1,5 @@
 <div class="app" id="app">
+  <div class="dropzone" id="dropzone" hidden><div>ST-Datei(en) hier ablegen<span>Programm wird übersetzt und der Ablaufplan erzeugt</span></div></div>
   <header class="bar">
     <div class="brand"><h1>ST Prüfstand</h1></div>
 
@@ -50,7 +51,7 @@
             <button class="btn small" id="btnOpen" title="Datei in diesen Editor laden">Öffnen</button>
             <button class="btn small" id="btnCopy" title="Inhalt kopieren">Kopieren</button>
             <button class="btn small" id="btnSave" title="Speichern" hidden>Speichern</button>
-            <input type="file" id="fileInput" accept=".st,.sttest,.txt,.exp" hidden>
+            <input type="file" id="fileInput" accept=".st,.sttest,.txt,.exp,.TcPOU,.TcGVL,.TcDUT" hidden>
           </div>
         </div>
         <div class="view" id="ed-prog"></div>
@@ -79,6 +80,8 @@
       <div class="pane chart-pane">
         <div class="chart-head">
           <h2 id="chartTitle">Ablaufplan</h2>
+          <button class="btn small" id="btnLoadProg" title="Beliebiges ST-Programm laden (.st, .exp, TwinCAT .TcPOU/.TcGVL/.TcDUT) – mehrere Dateien möglich, auch per Drag &amp; Drop">ST-Programm laden…</button>
+          <input type="file" id="progInput" accept=".st,.txt,.exp,.EXP,.TcPOU,.TcGVL,.TcDUT,.sttest" multiple hidden>
           <select id="selChart" class="mini-select" hidden title="Schrittkette wählen"></select>
           <div class="hist" id="stepHist" aria-label="Schrittverlauf"></div>
           <div class="zoom">
@@ -111,7 +114,7 @@
           </section>
 
           <section class="pblock" id="sigBlock" hidden>
-            <h3>Interne Signale <span class="sub">vom Programm berechnet · Schalter hält den Wert fest</span></h3>
+            <h3>Signale im Ablauf <span class="sub">aus den Bedingungen · Berechnetes wird festgehalten (lösen gibt frei)</span></h3>
             <div class="io" id="ioSig"></div>
           </section>
 

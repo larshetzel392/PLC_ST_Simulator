@@ -52,7 +52,7 @@ if (!testFile) {
 console.log(bold(`\n▶ Tests (${path.basename(testFile)})`));
 const r = ST.runTests(plc, fs.readFileSync(testFile, 'utf8'), { file: testFile });
 r.diags.forEach(printDiag);
-if (r.diags.some(d => d.kind === 'error')) console.log(red('✗ Testdatei enthält Fehler'));
+if (r.diags.some(d => d.kind === 'error')) { console.log(red('\n✗ Testdatei enthält Fehler – keine Tests ausgeführt')); process.exit(1); }
 let pass = 0, fail = 0;
 for (const t of r.results) {
   const time = dim(`${t.cycles} Zyklen, ${ST.T.formatTime(t.simTime).slice(2)}, ${t.asserts} Asserts`);

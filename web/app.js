@@ -216,8 +216,23 @@
     if (plc.ok && eds.tests.value.trim()) {
       try { tdiags = ST.runTests(plc, eds.tests.value, { file: FILES.tests, only: [] }).diags; } catch (e) { console.error(e); }
     }
-    showDiagnostics(plc.diags, tdiags);
+    tdiags = mismatch(tdiags, FILES.tests, 'Die Testdatei', 'clearTests');
+    const cd = plc.diags.filter(d => d.file !== FILES.model);
+    const md = mismatch(plc.diags.filter(d => d.file === FILES.model), FILES.model, 'Das Anlagenmodell', 'modelOff');
+    showDiagnostics(cd.concat(md), tdiags);
     return plc;
+  }
+
+  // Gehört Testdatei/Anlagenmodell offensichtlich zu einem anderen Programm (viele unbekannte Namen),
+  // statt hunderter Einzelfehler einen Hinweis mit Abhilfe zeigen
+  function mismatch(diags, file, what, action) {
+    const unknown = diags.filter(d => d.kind === 'error' && /nicht deklariert|hat kein Element|Unbekannte/.test(d.msg));
+    if (unknown.length < 5 || unknown.length < diags.filter(d => d.kind === 'error').length / 2) return diags;
+    const names = [...new Set(unknown.map(d => (/'([^']+)'/.exec(d.msg) || [])[1]).filter(Boolean))];
+    return [{
+      kind: 'error', file, line: 0, col: 0, action,
+      msg: `${what} passt nicht zu diesem Programm – ${names.length} unbekannte Namen (z.B. ${names.slice(0, 4).join(', ')}). Vermutlich stammt sie vom vorherigen Programm.`,
+    }];
   }
 
   // Gelöschte Meldungen: Warnungen bleiben weg (Schlüssel ohne Zeile, damit sie beim Tippen nicht zurückkommen),
@@ -278,6 +293,18 @@
       del.setAttribute('aria-label', 'Meldung löschen');
       del.addEventListener('click', e => { e.stopPropagation(); dismiss([d]); });
       li.append(del);
+      if (d.action) {
+        const fix = document.createElement('button');
+        fix.className = 'btn small fix';
+        fix.textContent = d.action === 'clearTests' ? 'Testdatei leeren' : 'Anlagenmodell ausschalten';
+        fix.addEventListener('click', e => {
+          e.stopPropagation();
+          if (d.action === 'clearTests') { eds.tests.value = ''; store.set('src.tests', ''); changed('tests'); status('Testdatei geleert.', 'ok'); }
+          else { setSource(false); }
+          liveCheck(); updateSourceUi();
+        });
+        li.querySelector('.msg').append(document.createElement('br'), fix);
+      }
       li.addEventListener('click', () => jumpTo(d.file, d.line, d.col));
       ul.append(li);
     }
@@ -309,8 +336,10 @@
     state.dirty = false;
     const setupMsg = applyStartState();
     for (const [p, f] of oldForces) { try { plc.force(p, f.value); } catch (e) { /* Variable entfällt */ } }
+    const prevTitle = curChart() && curChart().title;
     state.charts = ST.extractCharts(plc);
-    if (state.chartIdx >= state.charts.length) state.chartIdx = 0;
+    const keep = state.charts.findIndex(c => c.title === prevTitle);
+    state.chartIdx = keep >= 0 ? keep : 0;
     state.hist = []; state.lastStep = undefined; state.zoom = null;
     const w = plc.diags.filter(d => d.kind === 'warning').length;
     status(`Übersetzt. Tasks: ${plc.tasks.map(t => plc.compiler.pous.get(t).display).join(' → ')}${setupMsg}${w ? ` · ${w} Warnung(en)` : ''}`, 'ok');
@@ -439,13 +468,18 @@
       (v.plcWrites ? outs : ins).push({ path: v.display, info: v });
     }
     if (!ins.length && !outs.length) {
+      // keine globalen Variablen: Variablen der Task-Programme nehmen
+      // (gelesen, aber nie beschrieben = Eingang; vom Programm beschrieben = Ausgang/Merker)
       for (const t of state.plc.tasks) {
         const p = comp.pous.get(t);
         if (p.role === 'model') continue;
         for (const v of p.vars.values()) {
-          if (!(v.type.k === 'elem' || v.type.k === 'enum')) continue;
-          if (v.section === 'VAR_INPUT') ins.push({ path: p.display + '.' + v.display, info: v });
-          if (v.section === 'VAR_OUTPUT') outs.push({ path: p.display + '.' + v.display, info: v });
+          if (v.constant || !(v.type.k === 'elem' || v.type.k === 'enum') || v.section === 'VAR_TEMP') continue;
+          const item = { path: p.display + '.' + v.display, info: v };
+          const addr = (v.address || '').toUpperCase();
+          if (addr.startsWith('%I') || v.section === 'VAR_INPUT') ins.push(item);
+          else if (addr.startsWith('%Q') || v.section === 'VAR_OUTPUT') outs.push(item);
+          else if (v.section === 'VAR' && v.used) (v.plcWrites ? outs : ins).push(item);
         }
       }
     }
@@ -453,25 +487,33 @@
   }
   // BOOL-Variablen aus den Transitionen, die keine echten Eingänge sind (z.B. xAuto, xReset)
   function chainSignals(exclude) {
-    const ch = state.charts[state.chartIdx];
+    const ch = curChart();
     const seen = new Set(), out = [];
-    const visit = conds => {
-      for (const c of conds) {
-        if (!c.e) continue;
-        ST.exprText(c.e, (node, text) => {
-          const p = ch.pathOf(node);
-          if (p && !seen.has(p) && !exclude.has(p)) {
-            seen.add(p);
-            const ref = refOf(p);
-            if (ref && ref.set && T.isBool(ref.t)) out.push({ path: p, info: ref.info || {}, ref });
-          }
-          return text;
-        });
-      }
+    const visit = e => {
+      if (!e) return;
+      ST.exprText(e, (node, text) => {
+        const p = ch.pathOf(node);
+        if (p && !seen.has(p) && !exclude.has(p)) {
+          seen.add(p);
+          const ref = refOf(p);
+          if (ref && ref.set && T.isBool(ref.t)) out.push({ path: p, info: ref.info || {}, ref });
+        }
+        return text;
+      });
     };
-    if (ch) {
-      ch.transitions.slice().sort((a, b) => a.from - b.from).forEach(t => visit(t.conds));
-      ch.globalTrans.forEach(t => visit(t.conds));
+    if (ch && ch.kind === 'chain') {
+      ch.transitions.slice().sort((a, b) => a.from - b.from).forEach(t => t.conds.forEach(c => visit(c.e)));
+      ch.globalTrans.forEach(t => t.conds.forEach(c => visit(c.e)));
+    } else if (ch) {
+      // Bedingungen im Programmablaufplan
+      const walk = n => {
+        if (!n) return;
+        if (n.t === 'seq') n.items.forEach(walk);
+        else if (n.t === 'if') { visit(n.cond); walk(n.yes); walk(n.no); }
+        else if (n.t === 'case') { visit(n.stmt.expr); n.branches.forEach(b => walk(b.body)); walk(n.other); }
+        else if (n.t === 'loop') { if (n.stmt.cond) visit(n.stmt.cond); walk(n.body); }
+      };
+      walk(ch.flow);
     }
     // dazu alle BOOL-Eingänge der Programme (z.B. PRG_Ausgaenge.xFreigabe)
     for (const p of state.plc.programs) {
@@ -483,7 +525,7 @@
         if (ref && ref.set) { seen.add(path); out.push({ path, info: v, ref }); }
       }
     }
-    return out;
+    return out.slice(0, 40);
   }
 
   function renderIO() {
@@ -499,7 +541,8 @@
     const mk = (item, isIn, isSig) => {
       const row = document.createElement('div');
       row.className = 'iorow';
-      const comment = lineComment(item.info.file, item.info.line);
+      const comment = item.info.stub ? 'Platzhalter-Baustein (Bibliothek fehlt) – von Hand setzen'
+        : item.info.plcWrites && isSig ? 'vom Programm berechnet' : lineComment(item.info.file, item.info.line);
       const isBool = T.isBool(item.info.type);
       let ctl;
       if (isBool && isIn) {
@@ -601,7 +644,9 @@
     if (!hasModel && state.modelOn) state.modelOn = false;
     $('srcManual').setAttribute('aria-checked', String(!state.modelOn));
     $('srcModel').setAttribute('aria-checked', String(state.modelOn));
-    $('chkSetup').parentElement.hidden = state.modelOn;
+    // SETUP gibt es nur mit Testdatei
+    const hasSetup = /^\s*SETUP\b/im.test(eds.tests.value);
+    $('chkSetup').parentElement.hidden = state.modelOn || !hasSetup;
     $('srcHint').textContent = state.modelOn
       ? 'Das Anlagenmodell setzt die Sensoren aus den Ausgängen. Bedienelemente wie EIN/START schaltest du weiterhin selbst; Sensoren werden im nächsten Zyklus vom Modell überschrieben.'
       : (hasModel ? 'Du schaltest alle Eingänge selbst – die Kette springt weiter, sobald eine Transition erfüllt ist.' : 'Du schaltest alle Eingänge selbst. Für automatische Sensoren im Code-Bereich ein Anlagenmodell anlegen.');
@@ -712,16 +757,24 @@
   $('allVars').addEventListener('toggle', () => updateWatch(true));
 
   // ---------- Ablaufplan ----------
-  const G = { SW: 64, SH: 44, ACTW: 250, ACTGAP: 24, COLW: 460, SLOT: 290, TOP: 24 };
+  const G = { SW: 64, SH: 44, ACTW: 260, ACTGAP: 24, COLW: 470, SLOT: 290, TOP: 24 };
+  const curChart = () => state.charts[state.chartIdx];
+  const stepW = s => Math.max(G.SW, Math.round(String(s.label).length * 10.5 + 26));
+  const stepLabel = (ch, n) => { const s = ch.steps.find(x => x.n === n); return s ? s.label : String(n); };
+  // Ziel einer Transition; berechnete Ziele (iStep := iNext) als Ausdruck
+  const toLabel = (ch, t) => (t.to === null ? `${t.toText} (berechnet)` : stepLabel(ch, t.to));
 
   function trackStep() {
-    const ch = state.charts[state.chartIdx];
-    if (!ch) return;
-    const v = safeRead(ch.path);
-    if (v !== state.lastStep) {
-      state.lastStep = v;
+    const ch = curChart();
+    if (!ch || ch.kind !== 'chain' || !state.plc) return;
+    let act;
+    try { act = ch.active(); } catch (e) { act = []; }
+    const key = act.join(',');
+    if (key !== state.lastStep) {
+      state.lastStep = key;
       state.stepSince = state.plc.rt.now;
-      state.hist = (state.hist || []).concat([{ n: v, t: state.plc.rt.now }]).slice(-14);
+      const lbl = act.length ? act.map(n => stepLabel(ch, n)).join('+') : '–';
+      state.hist = (state.hist || []).concat([{ n: lbl, t: state.plc.rt.now }]).slice(-14);
       state.stepChanged = true;
     }
   }
@@ -760,15 +813,15 @@
     for (const s of ch.steps) (layers[layer.get(s.n)] = layers[layer.get(s.n)] || []).push(s);
     // Größen
     const actH = s => {
-      const m = state.measured && state.measured.get(ch.path + '#' + s.n);
+      const m = state.measured && state.measured.get(ch.title + '#' + s.n);
       if (m) return m;
-      let rows = s.actions.reduce((a, x) => a + Math.ceil((x.outputs.map(o => o.display).join(' ').length + x.display.length + 6) / 30), 0);
-      for (const e of s.entry) rows += 1 + e.text.reduce((a, t) => a + Math.ceil(t.length / 34), 0);
+      let rows = 0;
+      for (const a of s.ops) rows += a.action ? Math.ceil(((a.outputs || []).map(o => o.display).join(' ').length + a.display.length + 6) / 30) : 1 + Math.ceil(a.text.length / 34);
       return rows ? Math.max(G.SH, rows * 19 + 10) : 0;
     };
-    const condLines = t => Math.ceil(t.condsText.join(' AND ').length / 30) || 1;
+    const condLines = t => (Math.ceil(t.condsText.join(' AND ').length / 30) || 1) + (t.does && t.does.length ? Math.ceil(t.does.join('; ').length / 32) : 0);
     const pos = new Map();
-    let y = G.TOP + (ch.globalTrans.length ? 64 : 0);
+    let y = G.TOP + (ch.globalTrans.length ? 30 + ch.globalTrans.length * 34 : 0);
     const layerInfo = [];
     layers.forEach((L, li) => {
       if (!L) return;
@@ -777,7 +830,7 @@
       L.forEach((s, i) => {
         const h = actH(s);
         rowH = Math.max(rowH, h);
-        pos.set(s.n, { x: (i - (L.length - 1) / 2) * G.COLW, y, actH: h, layer: li });
+        pos.set(s.n, { x: (i - (L.length - 1) / 2) * G.COLW, y, actH: h, layer: li, w: stepW(s) });
       });
       let lines = 1;
       for (const s of L) for (const t of out.get(s.n)) lines = Math.max(lines, condLines(t));
@@ -799,17 +852,15 @@
         used.push(bx);
         edges.push({ t, from: s.n, bx, jump: false });
       }
-      let k = 0;
       for (const t of jumps) {
         let bx;
         if (list.length === 1) bx = p.x;
         else {
-          const cands = [];
-          for (let d = 1; d < 6; d++) cands.push(p.x - d * G.SLOT, p.x + d * G.SLOT);
-          cands.unshift(p.x);
+          const cands = [p.x];
+          for (let d = 1; d < 8; d++) cands.push(p.x - d * G.SLOT, p.x + d * G.SLOT);
           bx = cands.find(c => !used.some(u => Math.abs(u - c) < 60));
         }
-        used.push(bx); k++;
+        used.push(bx);
         edges.push({ t, from: s.n, bx, jump: true });
       }
       p.yDiv = li.bottom + 12;
@@ -817,60 +868,72 @@
     }
     // Verschieben in den positiven Bereich
     let minX = Infinity, maxX = -Infinity;
-    for (const p of pos.values()) { minX = Math.min(minX, p.x - G.SW / 2 - 90); maxX = Math.max(maxX, p.x + G.SW / 2 + G.ACTGAP + G.ACTW); }
+    for (const p of pos.values()) { minX = Math.min(minX, p.x - p.w / 2 - 90); maxX = Math.max(maxX, p.x + p.w / 2 + G.ACTGAP + G.ACTW); }
     for (const e of edges) { minX = Math.min(minX, e.bx - 250); maxX = Math.max(maxX, e.bx + 250); }
+    if (ch.globalTrans.length) maxX = Math.max(maxX, minX + 420);
     const dx = 24 - minX;
     for (const p of pos.values()) p.x += dx;
     for (const e of edges) e.bx += dx;
     return { pos, edges, layerInfo, W: maxX - minX + 48, H: y + 20 };
   }
 
-  function condHtml(ch, conds) {
-    // Ausdruck mit anklickbaren Variablen
-    const chips = [];
-    const wrap = (node, text) => {
+  // Ausdruck mit anklickbaren Variablen
+  function chipWrap(ch, chips) {
+    return (node, text) => {
       const p = ch.pathOf(node);
       if (!p) return text;
       chips.push(`<button class="chip" data-path="${esc(p)}" title="${esc(p)}">${esc(text)}<span class="v"></span></button>`);
       return '\u0001' + (chips.length - 1) + '\u0002';
     };
-    const parts = conds.map(c => {
-      if (!c.e) return c.text;
-      const txt = ST.exprText(c.e, wrap);
-      if (!c.neg) return txt;
-      const simple = c.e.e === 'id' || c.e.e === 'member';
-      return 'NOT ' + (simple ? txt : '(' + txt + ')');
-    });
-    return esc(parts.join(' AND ') || 'TRUE').replace(/\u0001(\d+)\u0002/g, (m, i) => chips[+i]);
+  }
+  const unchip = (s, chips) => esc(s).replace(/\u0001(\d+)\u0002/g, (m, i) => chips[+i]);
+  function condHtml(ch, conds) {
+    const chips = [];
+    const wrap = chipWrap(ch, chips);
+    const parts = conds.map(c => ST.condText(c, wrap));
+    return unchip(parts.join(' AND ') || 'TRUE', chips);
+  }
+  function exprHtml(ch, e) {
+    const chips = [];
+    return unchip(ST.exprText(e, chipWrap(ch, chips)), chips);
+  }
+
+  function chartOptions() {
+    const sel = $('selChart'), chs = state.charts;
+    const chains = chs.filter(c => c.kind === 'chain'), flows = chs.filter(c => c.kind === 'flow');
+    const opt = c => `<option value="${c.id}">${esc(c.title)}</option>`;
+    sel.innerHTML = (chains.length ? `<optgroup label="Schrittketten">${chains.map(opt).join('')}</optgroup>` : '')
+      + (flows.length ? `<optgroup label="Programmablaufpläne">${flows.map(opt).join('')}</optgroup>` : '');
+    sel.hidden = chs.length < 2;
+    sel.value = String(state.chartIdx);
   }
 
   function renderChart() {
     const stage = $('chartStage');
-    const sel = $('selChart');
-    const chs = state.charts;
-    sel.hidden = chs.length < 2;
-    sel.innerHTML = chs.map((c, i) => `<option value="${i}">${esc(c.path)}</option>`).join('');
-    sel.value = String(state.chartIdx);
-    const ch = chs[state.chartIdx];
-    state.chartEls = null;
+    chartOptions();
+    const ch = curChart();
+    state.chartEls = null; state.flowEls = null;
+    $('stepHist').innerHTML = '';
     if (!state.plc) {
       $('chartTitle').textContent = 'Ablaufplan';
-      stage.innerHTML = '<div class="chart-empty">Noch kein Programm geladen. Im Bereich <b>Code</b> ein Programm eingeben und <b>Übersetzen</b> drücken.</div>';
+      stage.innerHTML = '<div class="chart-empty">Noch kein Programm geladen. Im Bereich <b>Code</b> ein Programm eingeben oder eine <code>.st</code>-Datei öffnen und <b>Übersetzen</b> drücken. Der Ablaufplan wird daraus automatisch erzeugt.</div>';
       stage.style.width = stage.style.height = '';
+      state.layout = null;
       return;
     }
     if (!ch) {
       $('chartTitle').textContent = 'Ablaufplan';
-      stage.innerHTML = `<div class="chart-empty"><p>In diesem Programm wurde keine Schrittkette erkannt.</p><p>Erkannt wird das übliche Muster einer Schrittkette in ST: eine Ganzzahl-Variable als Schrittmerker, ein <code>CASE iStep OF</code> mit den Schritten als Marken und darin Weiterschaltungen wie <code>IF E1 THEN iStep := 2; END_IF</code>. Aktionen werden über Zuweisungen wie <code>Motor := (iStep = 3);</code> zugeordnet.</p><p>Die Ein- und Ausgänge rechts lassen sich trotzdem schalten.</p></div>`;
+      stage.innerHTML = '<div class="chart-empty">Kein zyklisch laufendes Programm gefunden.</div>';
       stage.style.width = stage.style.height = '';
+      state.layout = null;
       return;
     }
-    $('chartTitle').textContent = `Ablaufplan ${ch.pou}.${ch.varName}`;
+    if (ch.kind === 'flow') return renderFlow(ch);
+    $('chartTitle').textContent = ch.flags ? `Schrittkette ${ch.inst}` : `Schrittkette ${ch.title}`;
     const L = layout(ch);
     state.layout = L;
     let svg = `<svg width="${L.W}" height="${L.H}" viewBox="0 0 ${L.W} ${L.H}">`;
     let html = '';
-    const bars = [];
     // Kanten
     for (const e of L.edges) {
       const p = L.pos.get(e.from);
@@ -880,46 +943,88 @@
       if (e.jump) {
         d += ` V${p.yBar + 34}`;
         svg += `<path class="ln" d="${d}"/><path class="arrow" d="M${e.bx - 6},${p.yBar + 30} L${e.bx + 6},${p.yBar + 30} L${e.bx},${p.yBar + 40} Z"/>`;
-        html += `<div class="jump" style="left:${e.bx - 60}px;top:${p.yBar + 44}px;width:120px;text-align:center">Sprung zu ${esc(e.t.to)}</div>`;
+        html += `<div class="jump" style="left:${e.bx - 70}px;top:${p.yBar + 44}px;width:140px;text-align:center">Sprung zu ${esc(toLabel(ch, e.t))}</div>`;
       } else {
         const q = L.pos.get(e.t.to);
         d += ` V${q.y - 16} H${q.x} V${q.y}`;
         svg += `<path class="ln" d="${d}"/>`;
       }
-      bars.push({ e, x: e.bx, y: p.yBar });
       svg += `<line class="bar" data-t="${e.t.idx}" x1="${e.bx - 14}" x2="${e.bx + 14}" y1="${p.yBar}" y2="${p.yBar}"/>`;
       const left = e.bx < sx - 10;
       const style = left ? `right:${L.W - (e.bx - 18)}px;top:${p.yBar - 11}px` : `left:${e.bx + 18}px;top:${p.yBar - 11}px`;
-      html += `<div class="cond${left ? ' left' : ''}" data-t="${e.t.idx}" style="${style}" title="Zeile ${e.t.line}">${condHtml(ch, e.t.conds)}</div>`;
+      const does = e.t.does && e.t.does.length ? `<span class="does">/ ${esc(e.t.does.join('; '))}</span>` : '';
+      html += `<div class="cond${left ? ' left' : ''}" data-t="${e.t.idx}" style="${style}" title="Zeile ${e.t.line}">${condHtml(ch, e.t.conds)}${does}</div>`;
     }
-    svg += '</svg>';
     // Rücksprung-Hinweise am Ziel
     const into = new Map();
-    for (const e of L.edges) if (e.jump) into.set(e.t.to, (into.get(e.t.to) || []).concat([e.from]));
+    for (const e of L.edges) if (e.jump) into.set(e.t.to, (into.get(e.t.to) || []).concat([stepLabel(ch, e.from)]));
     // Schritte und Aktionen
     for (const s of ch.steps) {
       const p = L.pos.get(s.n);
-      html += `<div class="step${s.n === ch.initial ? ' init' : ''}" data-step="${s.n}" title="Schritt ${s.n} – Klick: Schritt direkt setzen" style="left:${p.x - G.SW / 2}px;top:${p.y}px;width:${G.SW}px;height:${G.SH}px">${s.n}<span class="since"></span></div>`;
-      if (into.has(s.n)) html += `<div class="from-hint" style="right:${L.W - (p.x - G.SW / 2 - 10)}px;top:${p.y + 13}px">von ${into.get(s.n).join(', ')} →</div>`;
+      const tip = ch.flags ? `Schrittmerker ${s.label} – Klick: diesen Schritt aktiv setzen` : `Schritt ${s.label} – Klick: Schritt direkt setzen`;
+      html += `<div class="step${s.n === ch.initial ? ' init' : ''}${String(s.label).length > 3 ? ' long' : ''}" data-step="${s.n}" title="${esc(tip)}" style="left:${p.x - p.w / 2}px;top:${p.y}px;width:${p.w}px;height:${G.SH}px">${esc(s.label)}<span class="since"></span></div>`;
+      if (into.has(s.n)) html += `<div class="from-hint" style="right:${L.W - (p.x - p.w / 2 - 10)}px;top:${p.y + 13}px">von ${esc(into.get(s.n).join(', '))} →</div>`;
       if (p.actH) {
         let rows = '';
-        for (const a of s.actions) {
-          const outs = a.outputs.length
-            ? a.outputs.map(o => `<span class="lamp" data-lamp="${esc(o.path)}"></span>${esc(o.display)}`).join(' ') + ` <span class="out">(${esc(a.display)})</span>`
-            : `<span class="lamp" data-lamp="${esc(a.path)}"></span>${esc(a.display)}`;
-          rows += `<div class="arow"><span class="q">N</span><span class="an">${outs}</span></div>`;
+        for (const a of s.ops) {
+          if (a.action) {
+            const outs = a.outputs.length
+              ? a.outputs.map(o => `<span class="lamp" data-lamp="${esc(o.path)}"></span>${esc(o.display)}`).join(' ') + ` <span class="out">(${esc(a.display)})</span>`
+              : `${a.lamp && refOf(a.lamp) && T.isBool(refOf(a.lamp).t) ? `<span class="lamp" data-lamp="${esc(a.lamp)}"></span>` : ''}${esc(a.display)}${a.lamp && refOf(a.lamp) && !T.isBool(refOf(a.lamp).t) ? ` <span class="pv" data-pv="${esc(a.lamp)}"></span>` : ''}`;
+            rows += `<div class="arow"><span class="q" title="nicht speichernd: aktiv, solange der Schritt aktiv ist">N</span><span class="an">${outs}</span></div>`;
+          } else {
+            const qt = { E: 'beim Eintritt in den Schritt', C: a.label, N: 'wird ausgeführt, solange der Schritt aktiv ist' }[a.q];
+            // BOOL-Ziel: Lampe; Zahl/Text: aktueller Wert
+            const lr = a.lamp ? refOf(a.lamp) : null;
+            const ind = !lr ? '' : T.isBool(lr.t) ? `<span class="lamp" data-lamp="${esc(a.lamp)}"></span>` : '';
+            const val = lr && !T.isBool(lr.t) ? ` <span class="pv" data-pv="${esc(a.lamp)}"></span>` : '';
+            rows += `<div class="arow"><span class="q" title="${esc(qt)}">${a.q === 'C' ? '?' : a.q}</span><span class="entry">${a.q === 'N' ? '' : `<i>${esc(a.label)}:</i> `}${ind}${esc(a.text)}${val}</span></div>`;
+          }
         }
-        for (const en of s.entry) rows += `<div class="arow"><span class="q" title="${esc(en.label)}">${en.label === 'Eingang' ? 'E' : '?'}</span><span class="entry">${en.label === 'Eingang' ? 'beim Eintritt: ' : esc(en.label) + ': '}${esc(en.text.join('; '))}</span></div>`;
-        html += `<div class="act" data-act="${s.n}" style="left:${p.x + G.SW / 2 + G.ACTGAP}px;top:${p.y}px;width:${G.ACTW}px;min-height:${G.SH}px">${rows}</div>`;
-        svg = svg.replace('</svg>', `<line class="ln" x1="${p.x + G.SW / 2}" x2="${p.x + G.SW / 2 + G.ACTGAP}" y1="${p.y + G.SH / 2}" y2="${p.y + G.SH / 2}"/></svg>`);
+        html += `<div class="act" data-act="${s.n}" style="left:${p.x + p.w / 2 + G.ACTGAP}px;top:${p.y}px;width:${G.ACTW}px;min-height:${G.SH}px">${rows}</div>`;
+        svg += `<line class="ln" x1="${p.x + p.w / 2}" x2="${p.x + p.w / 2 + G.ACTGAP}" y1="${p.y + G.SH / 2}" y2="${p.y + G.SH / 2}"/>`;
       }
     }
+    svg += '</svg>';
     // Transitionen aus jedem Schritt (z.B. Reset)
     if (ch.globalTrans.length) {
       html += `<div class="gtrans" id="gtrans">` + ch.globalTrans.map((t, i) =>
-        `<div data-g="${i}"><b>Aus jedem Schritt → ${esc(t.to)}</b> wenn ${condHtml(ch, t.conds)}</div>`).join('') + '</div>';
+        `<div data-g="${i}"><b>Aus jedem Schritt → ${esc(toLabel(ch, t))}</b> wenn ${condHtml(ch, t.conds)}${t.does && t.does.length ? `<span class="does">/ ${esc(t.does.join('; '))}</span>` : ''}</div>`).join('') + '</div>';
     }
     stage.innerHTML = `<div class="chart-canvas" id="chartCanvas" style="width:${L.W}px;height:${L.H}px">${svg}${html}</div>`;
+    wireChips(stage);
+    stage.querySelectorAll('.step').forEach(el => el.addEventListener('click', () => {
+      const n = +el.dataset.step;
+      try { ch.setStep(n); } catch (e) { status(e.message, 'bad'); return; }
+      trackStep();
+      status(ch.flags ? `Schrittmerker ${stepLabel(ch, n)} gesetzt, die anderen zurückgesetzt.` : `${ch.path} := ${stepLabel(ch, n)} gesetzt.`);
+      updateAll(true);
+    }));
+    state.chartEls = {
+      steps: new Map([...stage.querySelectorAll('.step')].map(e => [+e.dataset.step, e])),
+      acts: new Map([...stage.querySelectorAll('.act')].map(e => [+e.dataset.act, e])),
+      bars: [...stage.querySelectorAll('line.bar')],
+      conds: [...stage.querySelectorAll('.cond')],
+      chips: [...stage.querySelectorAll('.chip')],
+      lamps: [...stage.querySelectorAll('[data-lamp]')],
+      gtrans: [...stage.querySelectorAll('[data-g]')],
+      pvs: [...stage.querySelectorAll('[data-pv]')],
+    };
+    applyZoom();
+    // tatsächliche Höhen der Aktionsboxen messen und bei Abweichung einmal neu auslegen
+    if (!state.remeasuring) {
+      state.measured = state.measured || new Map();
+      let redo = false;
+      for (const s of ch.steps) {
+        const el = state.chartEls.acts.get(s.n), p = L.pos.get(s.n);
+        if (!el || !el.offsetHeight) continue;
+        if (Math.abs(el.offsetHeight - p.actH) > 2) { state.measured.set(ch.title + '#' + s.n, el.offsetHeight); redo = true; }
+      }
+      if (redo) { state.remeasuring = true; renderChart(); state.remeasuring = false; updateAll(true); }
+    }
+  }
+
+  function wireChips(stage) {
     stage.querySelectorAll('.chip').forEach(c => {
       const path = c.dataset.path;
       const ref = refOf(path);
@@ -930,52 +1035,45 @@
       else c.title = `${path} – Klick: umschalten`;
       c.addEventListener('click', ev => { ev.stopPropagation(); toggleVar(path); });
     });
-    stage.querySelectorAll('.step').forEach(el => el.addEventListener('click', () => {
-      const n = +el.dataset.step;
-      writeVar(ch.path, n);
-      trackStep();
-      status(`${ch.path} := ${n} gesetzt.`);
-    }));
-    state.chartEls = {
-      steps: new Map([...stage.querySelectorAll('.step')].map(e => [+e.dataset.step, e])),
-      acts: new Map([...stage.querySelectorAll('.act')].map(e => [+e.dataset.act, e])),
-      bars: [...stage.querySelectorAll('line.bar')],
-      conds: [...stage.querySelectorAll('.cond')],
-      chips: [...stage.querySelectorAll('.chip')],
-      lamps: [...stage.querySelectorAll('[data-lamp]')],
-      gtrans: [...stage.querySelectorAll('[data-g]')],
-    };
-    applyZoom();
-    // tatsächliche Höhen der Aktionsboxen messen und bei Abweichung einmal neu auslegen
-    if (!state.remeasuring) {
-      state.measured = state.measured || new Map();
-      let redo = false;
-      for (const s of ch.steps) {
-        const el = state.chartEls.acts.get(s.n), p = L.pos.get(s.n);
-        if (!el || !el.offsetHeight) continue;
-        if (Math.abs(el.offsetHeight - p.actH) > 2) { state.measured.set(ch.path + '#' + s.n, el.offsetHeight); redo = true; }
-      }
-      if (redo) { state.remeasuring = true; renderChart(); state.remeasuring = false; updateAll(true); }
+  }
+  function updateChips(els) {
+    for (const c of els.chips) {
+      const v = safeRead(c.dataset.path);
+      if (c.classList.contains('num')) { const r = refOf(c.dataset.path); c.lastChild.textContent = v === undefined || !r ? '' : ST.fmtValue(r.t, v); }
+      else c.classList.toggle('t', !!v);
+      c.style.borderColor = state.plc.forces.has(c.dataset.path) ? 'var(--force)' : '';
+    }
+    for (const l of els.lamps) l.classList.toggle('on', !!safeRead(l.dataset.lamp));
+    for (const p of els.pvs || []) {
+      const r = refOf(p.dataset.pv);
+      const v = safeRead(p.dataset.pv);
+      if (!r || v === undefined) { p.textContent = ''; continue; }
+      if (T.isBool(r.t)) { p.className = 'pv b' + (v ? ' t' : ''); p.textContent = ''; }
+      else { p.className = 'pv'; p.textContent = ST.fmtValue(r.t, v); }
     }
   }
 
   function updateChart() {
-    const ch = state.charts[state.chartIdx], els = state.chartEls;
-    if (!ch || !els || !state.plc) return;
-    const cur = safeRead(ch.path);
+    const ch = curChart();
+    if (!ch || !state.plc) return;
+    if (ch.kind === 'flow') return updateFlow(ch);
+    const els = state.chartEls;
+    if (!els) return;
+    let cur;
+    try { cur = ch.active(); } catch (e) { cur = []; }
     const ctx = ch.ctx();
     for (const [n, el] of els.steps) {
-      const on = n === cur;
+      const on = cur.includes(n);
       el.classList.toggle('active', on);
       if (on) {
         const dt = state.plc.rt.now - (state.stepSince || 0);
         el.lastChild.textContent = (dt / 1000).toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' s';
       }
     }
-    for (const [n, el] of els.acts) el.classList.toggle('active', n === cur);
+    for (const [n, el] of els.acts) el.classList.toggle('active', cur.includes(n));
     const truth = new Map();
     for (const t of ch.transitions) {
-      if (t.from !== cur || !t.eval) continue;
+      if (!cur.includes(t.from) || !t.eval) continue;
       let v = false;
       try { v = t.eval(ctx); } catch (e) { /* ignorieren */ }
       truth.set(t.idx, v);
@@ -993,25 +1091,246 @@
     ch.globalTrans.forEach((t, i) => {
       let v = false;
       try { v = t.eval ? t.eval(ctx) : false; } catch (e) { /* */ }
-      if (els.gtrans[i]) els.gtrans[i].parentElement.classList.toggle('go', v);
+      if (els.gtrans[i]) els.gtrans[i].classList.toggle('go', v);
     });
-    for (const c of els.chips) {
-      const v = safeRead(c.dataset.path);
-      if (c.classList.contains('num')) c.lastChild.textContent = v === undefined ? '' : ST.fmtValue(refOf(c.dataset.path).t, v);
-      else c.classList.toggle('t', !!v);
-      c.style.borderColor = state.plc.forces.has(c.dataset.path) ? 'var(--force)' : '';
-    }
-    for (const l of els.lamps) l.classList.toggle('on', !!safeRead(l.dataset.lamp));
+    updateChips(els);
     // Verlauf
     const hist = state.hist || [];
     $('stepHist').innerHTML = hist.length
       ? hist.map((h, i) => `<span class="hs${i === hist.length - 1 ? ' cur' : ''}" title="t = ${T.formatTime(h.t).slice(2)}">${esc(h.n)}</span>`).join('→')
       : '';
     if (state.stepChanged && $('chkFollow').checked) {
-      const el = els.steps.get(cur);
+      const el = els.steps.get(cur[0]);
       if (el) el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
     }
     state.stepChanged = false;
+  }
+
+  // ---------- Programmablaufplan (PAP nach DIN 66001) ----------
+  const F = { GAP: 26, GAPX: 36, CH: 7.3, LH: 17, MINW: 150, MAXW: 430, BR: 60 };
+  function textW(s) { return Math.min(F.MAXW, Math.max(F.MINW, Math.round(s.length * F.CH + 28))); }
+
+  // Größe und Zeichnung rekursiv; jeder Knoten hat Ein- und Ausgang mittig oben/unten
+  function flowMeasure(n) {
+    switch (n.t) {
+      case 'seq': {
+        n.items.forEach(flowMeasure);
+        n.w = n.items.reduce((a, x) => Math.max(a, x.w), 0);
+        n.h = n.items.reduce((a, x) => a + x.h, 0) + Math.max(0, n.items.length - 1) * F.GAP;
+        break;
+      }
+      case 'op': {
+        n.lines = n.stmts.map(s => ST.stmtText(s));
+        n.w = Math.max(...n.lines.map(textW)) + 34;
+        n.h = n.lines.length * F.LH + 14;
+        break;
+      }
+      case 'call': n.text = ST.stmtText(n.stmt); n.w = textW(n.text) + 24; n.h = 34; break;
+      case 'jump': n.text = ST.stmtText(n.stmt); n.w = 110; n.h = 30; break;
+      case 'if': {
+        n.text = ST.exprText(n.cond);
+        let chips = 0;
+        ST.exprText(n.cond, (x, t) => { chips++; return t; });
+        const tw = n.text.length * F.CH + chips * 24;
+        n.hw = Math.min(F.MAXW + 60, Math.max(170, tw + 104));
+        n.hh = 22 + Math.ceil(tw / (n.hw - 100)) * 22;
+        flowMeasure(n.yes); flowMeasure(n.no);
+        n.cols = [n.yes, n.no];
+        layoutCols(n);
+        break;
+      }
+      case 'case': {
+        n.text = 'CASE ' + ST.exprText(n.stmt.expr) + ' OF';
+        n.hw = Math.max(170, n.text.length * F.CH + 70); n.hh = 26 + F.LH;
+        n.branches.forEach(b => flowMeasure(b.body));
+        if (n.other) flowMeasure(n.other);
+        n.cols = n.branches.map(b => b.body).concat(n.other ? [n.other] : [{ t: 'seq', items: [], w: 0, h: 0 }]);
+        n.labs = n.branches.map(b => b.label).concat(['sonst']);
+        if (n.cols.length > 4) {
+          // viele Zweige: als Leiter untereinander statt nebeneinander
+          n.vert = true;
+          const bw = n.cols.reduce((a, c) => Math.max(a, c.w), 80);
+          n.bodyX = 96; n.railX = n.bodyX + bw + 40;
+          n.w = Math.max(n.hw, n.railX + 20);
+          n.rows = n.cols.map(c => (c.items.length ? 22 + c.h + 14 : 30));
+          n.h = n.hh + 24 + n.rows.reduce((a, b) => a + b, 0) + 26;
+          break;
+        }
+        layoutCols(n);
+        break;
+      }
+      case 'loop': {
+        const s = n.stmt;
+        n.text = s.s === 'repeat' ? 'REPEAT' : ST.stmtText(s);
+        n.foot = s.s === 'for' ? 'END_FOR' : s.s === 'while' ? 'END_WHILE' : 'UNTIL ' + ST.exprText(s.cond);
+        flowMeasure(n.body);
+        n.lw = Math.max(textW(n.text), textW(n.foot)) + 20;
+        n.w = Math.max(n.lw, n.body.w);
+        n.h = 34 + F.GAP + n.body.h + (n.body.items.length ? F.GAP : 0) + 34;
+        break;
+      }
+    }
+  }
+  function layoutCols(n) {
+    const ws = n.cols.map(c => Math.max(c.w, F.BR));
+    const inner = ws.reduce((a, b) => a + b, 0) + (ws.length - 1) * F.GAPX;
+    n.w = Math.max(n.hw, inner);
+    let x = (n.w - inner) / 2;
+    n.cx = ws.map(w => { const c = x + w / 2; x += w + F.GAPX; return c; });
+    n.bh = Math.max(...n.cols.map(c => c.h));
+    n.h = n.hh + 34 + n.bh + 30;
+  }
+
+  function flowDraw(ch, n, x0, y0, out) {
+    // x0: linke Kante des Knotens, y0: Oberkante; Mittellinie bei x0 + n.w / 2
+    const cx = x0 + n.w / 2;
+    const id = out.nodes.length;
+    switch (n.t) {
+      case 'seq': {
+        let y = y0;
+        n.items.forEach((it, i) => {
+          if (i > 0) { out.edge(`M${cx},${y - F.GAP} V${y}`, () => isHot(it), true); }
+          flowDraw(ch, it, cx - it.w / 2, y, out);
+          y += it.h + F.GAP;
+        });
+        if (!n.items.length) out.svg += '';
+        return;
+      }
+      case 'op': {
+        out.nodes.push({ n, hot: () => n.stmts.some(s => s.hit === cyc()) });
+        const rows = n.stmts.map((s, i) => {
+          const p = s.target ? ch.pathOf(s.target) : null;
+          return `<div class="pl" title="${esc(n.lines[i])} – Zeile ${s.line}">${esc(n.lines[i])}${p ? `<span class="pv" data-pv="${esc(p)}"></span>` : ''}</div>`;
+        }).join('');
+        out.html += `<div class="pap op" data-node="${id}" data-line="${n.stmts[0].line}" style="left:${x0}px;top:${y0}px;width:${n.w}px;height:${n.h}px">${rows}</div>`;
+        return;
+      }
+      case 'call': case 'jump': {
+        out.nodes.push({ n, hot: () => n.stmt.hit === cyc() });
+        out.html += `<div class="pap ${n.t}" data-node="${id}" data-line="${n.stmt.line}" title="${esc(n.text)} – Zeile ${n.stmt.line}" style="left:${x0}px;top:${y0}px;width:${n.w}px;height:${n.h}px"><span>${esc(n.text)}</span></div>`;
+        return;
+      }
+      case 'if': case 'case': {
+        const s = n.stmt;
+        const isIf = n.t === 'if';
+        const evaluated = isIf ? () => s.hit === cyc() && s.br >= n.bi : () => s.hit === cyc();
+        out.nodes.push({ n, hot: evaluated });
+        const hx = cx - n.hw / 2;
+        const label = isIf ? exprHtml(ch, n.cond) : esc(n.text);
+        out.html += `<div class="pap dec${isIf ? '' : ' case'}" data-node="${id}" data-line="${isIf ? n.cond.line || s.line : s.line}" style="left:${hx}px;top:${y0}px;width:${n.hw}px;height:${n.hh}px"><span><span class="ct">${label}</span></span></div>`;
+        const yb = y0 + n.hh, yc = yb + 34;
+        if (n.vert) {
+          const sx = x0 + 22, rx = x0 + n.railX, bx0 = x0 + n.bodyX;
+          let y = yb + 24;
+          out.edge(`M${cx},${yb} V${yb + 12} H${sx} V${y}`, evaluated, true);
+          n.cols.forEach((c, i) => {
+            const taken = () => s.hit === cyc() && s.br === i;
+            const ry = y + 8;
+            out.html += `<div class="pap-lab case" style="left:${sx + 8}px;top:${ry - 16}px">${esc(n.labs[i])}</div>`;
+            if (i < n.cols.length - 1) out.edge(`M${sx},${y} V${y + n.rows[i]}`, () => evaluated() && s.br > i, true);
+            if (!c.items.length) out.edge(`M${sx},${y} V${ry} H${rx}`, taken, true);
+            else {
+              const bcx = bx0 + c.w / 2;
+              out.edge(`M${sx},${y} V${ry} H${bcx} V${y + 22}`, taken);
+              flowDraw(ch, c, bx0, y + 22, out);
+              out.edge(`M${bcx},${y + 22 + c.h} V${y + 22 + c.h + 8} H${rx}`, taken, true);
+            }
+            y += n.rows[i];
+          });
+          out.edge(`M${rx},${yb + 30} V${y + 8} H${cx} V${y0 + n.h}`, evaluated, true);
+          return;
+        }
+        const ym = yc + n.bh + 16;
+        n.cols.forEach((c, i) => {
+          const bx = x0 + n.cx[i];
+          const taken = isIf ? (i === 0 ? () => evaluated() && s.br === n.bi : () => evaluated() && s.br > n.bi) : () => s.hit === cyc() && s.br === i;
+          const lab = isIf ? (i === 0 ? 'ja' : 'nein') : (i < n.branches.length ? n.branches[i].label : (n.other ? 'sonst' : 'sonst'));
+          out.html += `<div class="pap-lab${isIf && i === 1 ? ' no' : ''}" style="left:${bx + 5}px;top:${yb + 13}px">${esc(lab)}</div>`;
+          if (!c.items.length) { out.edge(`M${cx},${yb} V${yb + 12} H${bx} V${ym} H${cx}`, taken, true); return; }
+          out.edge(`M${cx},${yb} V${yb + 12} H${bx} V${yc}`, taken);
+          flowDraw(ch, c, bx - c.w / 2, yc, out);
+          out.edge(`M${bx},${yc + c.h} V${ym} H${cx}`, taken, true);
+        });
+        out.edge(`M${cx},${ym} V${y0 + n.h}`, () => evaluated(), true);
+        return;
+      }
+      case 'loop': {
+        const s = n.stmt;
+        out.nodes.push({ n, hot: () => s.hit === cyc() });
+        out.html += `<div class="pap loop" data-node="${id}" data-line="${s.line}" style="left:${cx - n.lw / 2}px;top:${y0}px;width:${n.lw}px;height:34px"><span>${esc(n.text)}</span></div>`;
+        let y = y0 + 34 + F.GAP;
+        out.edge(`M${cx},${y0 + 34} V${y}`, () => s.hit === cyc(), true);
+        if (n.body.items.length) {
+          flowDraw(ch, n.body, cx - n.body.w / 2, y, out);
+          y += n.body.h + F.GAP;
+          out.edge(`M${cx},${y - F.GAP} V${y}`, () => s.hit === cyc(), true);
+        }
+        out.html += `<div class="pap loop end" style="left:${cx - n.lw / 2}px;top:${y - (n.body.items.length ? 0 : F.GAP)}px;width:${n.lw}px;height:34px"><span>${esc(n.foot)}</span></div>`;
+        return;
+      }
+    }
+  }
+  const cyc = () => (state.plc ? state.plc.cycleCount : -1);
+  function isHot(n) {
+    if (!n) return false;
+    switch (n.t) {
+      case 'op': return n.stmts.some(s => s.hit === cyc());
+      case 'if': return n.stmt.hit === cyc() && n.stmt.br >= n.bi;
+      case 'seq': return n.items.length ? isHot(n.items[0]) : false;
+      default: return n.stmt.hit === cyc();
+    }
+  }
+
+  function renderFlow(ch) {
+    const stage = $('chartStage');
+    $('chartTitle').textContent = `Programmablaufplan ${ch.title}`;
+    flowMeasure(ch.flow);
+    const PAD = 40;
+    const W = Math.max(ch.flow.w, 200) + PAD * 2;
+    const out = { svg: '', html: '', nodes: [], edges: [] };
+    out.edge = (d, hot, plain) => { out.edges.push({ hot, arrow: !plain }); out.svg += `<path class="ln pe" data-e="${out.edges.length - 1}" d="${d}"${plain ? '' : ' marker-end="url(#arr)"'}/>`; };
+    const y0 = 74;
+    flowDraw(ch, ch.flow, PAD + (W - PAD * 2 - ch.flow.w) / 2, y0, out);
+    const cx = W / 2, yEnd = y0 + ch.flow.h + (ch.flow.items.length ? 28 : 0);
+    const H = yEnd + 34 + PAD;
+    const startTxt = ch.title.replace(/ \(.*\)$/, '');
+    const pre = `<div class="pap term" style="left:${cx - 90}px;top:${PAD - 14}px;width:180px;height:34px"><span>${esc(startTxt)}</span></div>`
+      + `<div class="pap term" style="left:${cx - 90}px;top:${yEnd}px;width:180px;height:34px"><span>Ende</span></div>`;
+    out.svg += `<path class="ln" d="M${cx},${PAD + 20} V${y0}"/>`;
+    if (ch.flow.items.length) out.svg += `<path class="ln" d="M${cx},${y0 + ch.flow.h} V${yEnd}"/>`;
+    const svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowhead"/></marker><marker id="arrh" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowhead hot"/></marker></defs>${out.svg}</svg>`;
+    stage.innerHTML = `<div class="chart-canvas flow" id="chartCanvas" style="width:${W}px;height:${H}px">${svg}${pre}${out.html}</div>`;
+    state.layout = { W, H };
+    wireChips(stage);
+    stage.querySelectorAll('.pap[data-line]').forEach(el => {
+      el.title = (el.title ? el.title + ' · ' : '') + 'Doppelklick: im Code zeigen';
+      el.addEventListener('dblclick', () => jumpTo(ch.file, +el.dataset.line, 1));
+    });
+    state.flowEls = {
+      nodes: out.nodes.map((nd, i) => ({ el: stage.querySelector(`[data-node="${i}"]`), hot: nd.hot })),
+      edges: out.edges.map((e, i) => ({ el: stage.querySelector(`[data-e="${i}"]`), hot: e.hot, arrow: e.arrow, last: null })),
+      chips: [...stage.querySelectorAll('.chip')],
+      lamps: [],
+      pvs: [...stage.querySelectorAll('[data-pv]')],
+    };
+    applyZoom();
+  }
+
+  function updateFlow(ch) {
+    const els = state.flowEls;
+    if (!els) return;
+    const on = state.plc.cycleCount > 0;
+    for (const x of els.nodes) if (x.el) x.el.classList.toggle('hot', on && !!x.hot());
+    for (const x of els.edges) {
+      if (!x.el) continue;
+      const h = on && !!x.hot();
+      if (h === x.last) continue;
+      x.last = h;
+      x.el.classList.toggle('hot', h);
+      if (x.arrow) x.el.setAttribute('marker-end', h ? 'url(#arrh)' : 'url(#arr)');
+    }
+    updateChips(els);
+    $('stepHist').innerHTML = `<span class="flow-note">${on ? `Zyklus ${state.plc.cycleCount}: hervorgehoben ist, was im letzten Zyklus gelaufen ist` : 'Noch kein Zyklus gelaufen – Start oder 1 Zyklus drücken'}</span>`;
   }
 
   function applyZoom() {
@@ -1027,11 +1346,18 @@
   function fitChart() {
     const L = state.layout, sc = $('chartScroll');
     if (!L || !sc.clientWidth) return;
-    state.zoom = Math.max(0.4, Math.min(1, (sc.clientWidth - 8) / L.W));
+    state.zoom = Math.max(0.3, Math.min(1, (sc.clientWidth - 8) / L.W));
+    state.autoZoom = true;
     applyZoom();
   }
-  $('btnZoomIn').addEventListener('click', () => { state.zoom = Math.min(2, (state.zoom || 1) * 1.15); applyZoom(); });
-  $('btnZoomOut').addEventListener('click', () => { state.zoom = Math.max(0.3, (state.zoom || 1) / 1.15); applyZoom(); });
+  $('btnZoomIn').addEventListener('click', () => { state.autoZoom = false; state.zoom = Math.min(2, (state.zoom || 1) * 1.15); applyZoom(); });
+  $('btnZoomOut').addEventListener('click', () => { state.autoZoom = false; state.zoom = Math.max(0.3, (state.zoom || 1) / 1.15); applyZoom(); });
+  // Fenstergröße geändert: eingepassten Plan neu einpassen (von Hand gezoomt bleibt)
+  let resizeT = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeT);
+    resizeT = setTimeout(() => { if (state.mode === 'sim' && (state.autoZoom || state.zoom === null)) fitChart(); }, 150);
+  });
   $('btnZoomFit').addEventListener('click', fitChart);
   $('selChart').addEventListener('change', e => { state.chartIdx = +e.target.value; state.hist = []; state.lastStep = undefined; renderChart(); fitChart(); trackStep(); updateAll(true); });
 
@@ -1164,13 +1490,91 @@
 
   // ---------- Dateien ----------
   $('btnOpen').addEventListener('click', () => $('fileInput').click());
+  // TwinCAT-XML (.TcPOU/.TcGVL/.TcDUT) in ST-Text umwandeln
+  function fromTwinCAT(xml) {
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    if (doc.querySelector('parsererror')) throw new Error('XML nicht lesbar');
+    const txt = (el, sel) => { const x = el.querySelector(sel); return x ? x.textContent.trim() : ''; };
+    const out = [];
+    for (const obj of doc.querySelectorAll('TcPlcObject > *')) {
+      const decl = txt(obj, ':scope > Declaration');
+      if (obj.tagName === 'POU') {
+        const kind = (/^\s*(?:\{[^}]*\}\s*)*(PROGRAM|FUNCTION_BLOCK|FUNCTION)\b/i.exec(decl) || [])[1] || 'PROGRAM';
+        out.push(decl, txt(obj, ':scope > Implementation > ST'));
+        for (const a of obj.querySelectorAll(':scope > Action')) out.push(`ACTION ${a.getAttribute('Name')}:`, txt(a, 'Implementation > ST'), 'END_ACTION');
+        for (const m of obj.querySelectorAll(':scope > Method')) out.push(txt(m, ':scope > Declaration'), txt(m, 'Implementation > ST'), 'END_METHOD');
+        out.splice(out.length - obj.querySelectorAll(':scope > Action, :scope > Method').length * 3, 0, 'END_' + kind.toUpperCase());
+      } else if (decl) out.push(decl);
+    }
+    return out.join('\n');
+  }
+  function importText(name, text) {
+    if (/\.Tc(POU|GVL|DUT)$/i.test(name) || /<TcPlcObject/.test(text.slice(0, 400))) return fromTwinCAT(text);
+    return text;
+  }
+  const readFile = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = () => rej(r.error); r.readAsText(f); });
+
+  // Beliebiges Programm laden: alle Dateien zusammen ins Programm, .sttest in die Tests,
+  // dann übersetzen und den automatisch erzeugten Ablaufplan zeigen
+  async function loadProgramFiles(list) {
+    const files = [...list];
+    if (!files.length) return;
+    stop();
+    const progs = [], tests = [];
+    try {
+      for (const f of files) {
+        const t = await readFile(f);
+        if (/\.sttest$/i.test(f.name)) tests.push({ name: f.name, text: t });
+        else progs.push({ name: f.name, text: importText(f.name, t) });
+      }
+    } catch (e) { status(`Laden fehlgeschlagen: ${e.message}`, 'bad'); return; }
+    // GVLs und Datentypen zuerst
+    const rank = p => (/^\s*(?:\(\*[\s\S]*?\*\)\s*)*(TYPE|VAR_GLOBAL)\b/i.test(p.text) ? 0 : 1);
+    progs.sort((a, b) => rank(a) - rank(b));
+    if (progs.length) {
+      eds.prog.value = progs.length === 1 ? progs[0].text : progs.map(p => `(* ===== ${p.name} ===== *)\n${p.text.trim()}\n`).join('\n');
+      FILES.prog = progs[0].name;
+      // das Anlagenmodell gehört zum alten Programm
+      if (eds.model.value.trim()) { eds.model.value = ''; FILES.model = 'anlage.st'; }
+      state.modelOn = false; store.set('modelOn', false);
+      if (!tests.length && eds.tests.value.trim()) { eds.tests.value = ''; FILES.tests = 'tests.sttest'; }
+    }
+    if (tests.length) { eds.tests.value = tests.map(t => t.text).join('\n'); FILES.tests = tests[0].name; }
+    for (const k of Object.keys(eds)) store.set('src.' + k, eds[k].value);
+    store.set('files', FILES);
+    state.plc = null; state.results = null; state.selTest = null; state.chartIdx = 0; state.charts = [];
+    renderResults();
+    const names = files.map(f => f.name).join(', ');
+    if (!progs.length) { selectEditor('tests'); changed('tests'); status(`${names} geladen.`); return; }
+    setMode('sim');
+    if (compile()) {
+      const chains = state.charts.filter(c => c.kind === 'chain').length;
+      const w = state.plc.diags.filter(d => d.kind === 'warning' && d.file !== undefined).length;
+      status(`${names} geladen – ${chains ? `${chains} Schrittkette${chains > 1 ? 'n' : ''} erkannt` : 'keine Schrittkette erkannt, Programmablaufplan erzeugt'}${w ? ` · ${w} Hinweis(e) unter Code › Meldungen` : ''}.`, 'ok');
+    }
+  }
+  $('btnLoadProg').addEventListener('click', () => $('progInput').click());
+  $('progInput').addEventListener('change', e => { loadProgramFiles(e.target.files); e.target.value = ''; });
+  // Drag & Drop von Dateien auf die Seite
+  let dragDepth = 0;
+  const hasFiles = e => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+  document.addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; $('dropzone').hidden = false; });
+  document.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  document.addEventListener('dragleave', e => { if (!hasFiles(e)) return; if (--dragDepth <= 0) { dragDepth = 0; $('dropzone').hidden = true; } });
+  document.addEventListener('drop', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); dragDepth = 0; $('dropzone').hidden = true;
+    loadProgramFiles(e.dataTransfer.files);
+  });
+
   $('fileInput').addEventListener('change', e => {
     const f = e.target.files[0];
     if (!f) return;
     const r = new FileReader();
     r.onload = () => {
       const target = /\.sttest$/i.test(f.name) ? 'tests' : state.activeEd;
-      eds[target].value = String(r.result);
+      try { eds[target].value = importText(f.name, String(r.result)); }
+      catch (err) { status(`${f.name}: ${err.message}`, 'bad'); return; }
       FILES[target] = f.name;
       selectEditor(target);
       changed(target);
@@ -1221,7 +1625,7 @@
     e.target.value = '';
     if (!name) return;
     try {
-      const txt = await serverText(name);
+      const txt = importText(name, await serverText(name));
       const target = /\.sttest$/i.test(name) ? 'tests' : (state.activeEd === 'tests' ? 'prog' : state.activeEd);
       eds[target].value = txt;
       FILES[target] = name;
@@ -1252,7 +1656,7 @@
     store.set('modelOn', state.modelOn);
     for (const k of Object.keys(eds)) store.set('src.' + k, eds[k].value);
     store.set('files', FILES);
-    state.plc = null; state.results = null; state.selTest = null;
+    state.plc = null; state.results = null; state.selTest = null; state.charts = []; state.chartIdx = 0;
     renderResults();
     if (compile()) status(`Beispiel „${ex.name}“ geladen.`, 'ok');
   }
@@ -1266,7 +1670,11 @@
     dismissed.clear(); dismissedErr.clear(); store.set('dismissed', []);
     showDiagnostics(state.compileDiags, state.testDiags);
   });
-  $('btnCompile').addEventListener('click', () => compile());
+  // Übersetzen per Knopf/Kürzel: bei Erfolg in die Simulation wechseln (wie in der Hilfe beschrieben)
+  function compileAndShow() {
+    if (compile() && state.mode === 'code') { setMode('sim'); fitChart(); run(); }
+  }
+  $('btnCompile').addEventListener('click', compileAndShow);
   $('btnRun').addEventListener('click', run);
   $('btnStop').addEventListener('click', stop);
   $('btnStep').addEventListener('click', step);
@@ -1277,7 +1685,7 @@
   $('watchFilter').addEventListener('input', () => renderWatch());
   $('inpCycle').addEventListener('change', () => { if (state.plc) state.plc.cycleMs = cycleMs(); store.set('cycle', cycleMs()); });
   document.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) runAllTests(); else compile(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) runAllTests(); else compileAndShow(); }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); if (isLocal) save(); }
   });
   window.addEventListener('resize', () => { if (state.mode === 'tests') renderTrace(); });
@@ -1285,10 +1693,13 @@
   // ---------- Hilfe ----------
   $('helpBox').innerHTML = `
 <h2>Ablauf</h2>
-<p>Programm unter <b>Programm</b> eingeben (CODESYS-Syntax). Fehler werden beim Tippen geprüft und am Zeilenrand markiert. <b>Übersetzen</b> lädt das Programm und wechselt in die Simulation.</p>
-<h2>Simulation</h2>
-<p>Der <b>Ablaufplan</b> wird aus dem Code erkannt (<code>CASE iStep OF</code> mit <code>iStep := n</code>). Der aktive Schritt ist blau, die Transitionen des aktiven Schritts sind gelb (wartet) oder grün (erfüllt). Variablen in den Bedingungen sind anklickbar. Klick auf einen Schritt setzt die Kette direkt dorthin.</p>
-<p>Rechts unter <b>Eingänge</b> schaltest du Sensoren und Taster. Vom Programm berechnete Variablen (z.B. <code>xAuto</code>) werden beim Anklicken <i>geforct</i> – erneuter Klick hebt das auf.</p>
+<p>Programm unter <b>Programm</b> eingeben (CODESYS-Syntax) oder mit <b>ST-Programm laden…</b> bzw. per Drag &amp; Drop öffnen – auch mehrere Dateien (Programm, GVL, Datentypen) und TwinCAT-Dateien (<code>.TcPOU</code>, <code>.TcGVL</code>, <code>.TcDUT</code>). Fehler werden beim Tippen geprüft und am Zeilenrand markiert. <b>Übersetzen</b> lädt das Programm und wechselt in die Simulation.</p>
+<p>Fehlt etwas, das in CODESYS in einer anderen Datei steht, wird es ergänzt und unter <b>Meldungen</b> als Hinweis aufgeführt: nicht deklarierte Variablen werden globale Variablen (Typ aus der Verwendung), unbekannte Bibliotheks-Bausteine (z.B. <code>MC_Power</code>) leere Platzhalter, deren Ausgänge du in der Simulation selbst setzt.</p>
+<h2>Ablaufplan</h2>
+<p>Der Ablaufplan wird automatisch aus dem Code erzeugt. Auswahl oben links:</p>
+<p><b>Schrittketten</b> – erkannt werden Ganzzahl- oder Aufzählungsvariablen, die als Schrittmerker dienen: <code>CASE iStep OF</code>, IF/ELSIF-Ketten (<code>IF iStep = 10 THEN …</code>), einzelne IFs (<code>IF iStep = 10 AND x THEN iStep := 20;</code>) und relative Sprünge (<code>iStep := iStep + 10</code>), außerdem BOOL-Schrittmerker (<code>IF S1 AND x THEN S1 := FALSE; S2 := TRUE;</code>). In Funktionsbausteinen gibt es je Instanz eine eigene Kette. Der aktive Schritt ist blau, die Transitionen des aktiven Schritts gelb (wartet) oder grün (erfüllt). Klick auf einen Schritt setzt die Kette dorthin.</p>
+<p><b>Programmablaufpläne</b> – für jedes Programm, jeden Funktionsbaustein, jede Aktion und Methode: Verzweigungen, CASE, Schleifen und Aufrufe als Flussdiagramm. Grün ist, was im letzten SPS-Zyklus durchlaufen wurde. Doppelklick auf ein Symbol springt in den Code.</p>
+<p>Variablen in Bedingungen sind anklickbar. Rechts unter <b>Eingänge</b> schaltest du Sensoren und Taster. Vom Programm berechnete Variablen (z.B. <code>xAuto</code>) werden beim Anklicken festgehalten (geforct) – „lösen“ gibt sie wieder frei.</p>
 <p><b>Grundstellung aus SETUP</b>: Beim Übersetzen und Kaltstart wird der SETUP-Block der Testdatei ausgeführt, z.B. Öffner und Endlagen auf TRUE.</p>
 <h2>Testdatei</h2>
 <pre>SETUP                       (* vor jedem Test *)
@@ -1309,7 +1720,7 @@ END_TEST</pre>
 <h2>Anlagenmodell</h2>
 <p>Ein zweites ST-Programm, das die Maschine nachbildet: Es liest die Ausgänge und setzt die Sensoren. Es läuft in jedem Zyklus vor dem SPS-Programm; <code>TIME()</code> liefert die Simulationszeit. Umschalten unter Simulation › Sensoren.</p>
 <h2>Sprachumfang</h2>
-<p>PROGRAM, FUNCTION_BLOCK, FUNCTION, VAR_GLOBAL, TYPE (STRUCT, Aufzählung), ARRAY, STRING, alle Ganzzahl-Typen, REAL/LREAL, TIME, Bitzugriff <code>x.3</code>, IF/CASE/FOR/WHILE/REPEAT. Standard-FBs TON, TOF, TP, R_TRIG, F_TRIG, CTU, CTD, CTUD, SR, RS und die üblichen Funktionen.</p>
+<p>PROGRAM, FUNCTION_BLOCK, FUNCTION, METHOD, ACTION, EXTENDS mit <code>SUPER^</code>/<code>THIS^</code>, VAR_GLOBAL, TYPE (STRUCT, Aufzählung), ARRAY, STRING, alle Ganzzahl-Typen, REAL/LREAL, TIME, Bitzugriff <code>x.3</code>, direkte Adressen (<code>%IX0.0</code>), <code>S=</code>/<code>R=</code>, Pragmas, IF/CASE/FOR/WHILE/REPEAT. Standard-FBs TON, TOF, TP, R_TRIG, F_TRIG, CTU, CTD, CTUD, SR, RS und die üblichen Funktionen. Nicht unterstützt: Zeiger/REFERENCE, PROPERTY, DATE-Literale.</p>
 <h2>Tastatur</h2>
 <table>
 <tr><td><code>Strg/Cmd + Enter</code></td><td>Übersetzen</td></tr>

@@ -1,0 +1,48 @@
+SETUP
+    xNotHalt := TRUE;        (* Öffner *)
+    xPortalHinten := TRUE;   (* Portal steht in Grundstellung hinten *)
+END_SETUP
+
+TEST 'Standardwäsche läuft komplett durch'
+    xStartTaster := TRUE; CYCLE; xStartTaster := FALSE;
+    ASSERT PLC_PRG.eSchritt = E_Wasch.EINFAHREN;
+    ASSERT xAmpelGruen, 'Ampel grün zum Einfahren';
+    xAutoInPos := TRUE; CYCLE;
+    ASSERT PLC_PRG.eSchritt = E_Wasch.VORWAESCHE;
+    ASSERT xShampoo AND xWasser;
+    RUN_UNTIL PLC_PRG.eSchritt = E_Wasch.BUERSTEN_VOR TIMEOUT T#5s;
+    (* zwei Durchgänge *)
+    xPortalHinten := FALSE; xPortalVorne := TRUE; CYCLE;
+    ASSERT PLC_PRG.eSchritt = E_Wasch.BUERSTEN_ZURUECK;
+    xPortalVorne := FALSE; xPortalHinten := TRUE; CYCLE;
+    ASSERT PLC_PRG.eSchritt = E_Wasch.BUERSTEN_VOR, '2. Durchgang';
+    xPortalHinten := FALSE; xPortalVorne := TRUE; CYCLE;
+    xPortalVorne := FALSE; xPortalHinten := TRUE; CYCLE;
+    ASSERT PLC_PRG.eSchritt = E_Wasch.SPUELEN;
+    RUN_UNTIL PLC_PRG.eSchritt = E_Wasch.AUSFAHRT TIMEOUT T#10s;
+    xAutoInPos := FALSE;
+    RUN_UNTIL PLC_PRG.eSchritt = E_Wasch.BEREIT TIMEOUT T#3s;
+    ASSERT PLC_PRG.nAutosHeute = 1;
+END_TEST
+
+TEST 'Premium bürstet dreimal'
+    xProgPremium := TRUE;
+    xStartTaster := TRUE; CYCLE; xStartTaster := FALSE;
+    xAutoInPos := TRUE;
+    RUN_UNTIL PLC_PRG.eSchritt = E_Wasch.BUERSTEN_VOR TIMEOUT T#5s;
+    ASSERT PLC_PRG.nSoll = 3;
+END_TEST
+
+TEST 'Person im Bereich während der Fahrt → Störung'
+    xStartTaster := TRUE; CYCLE; xStartTaster := FALSE;
+    xAutoInPos := TRUE;
+    RUN_UNTIL PLC_PRG.eSchritt = E_Wasch.BUERSTEN_VOR TIMEOUT T#5s;
+    CYCLE;
+    xLichtschranke := TRUE; CYCLE;
+    ASSERT PLC_PRG.eSchritt = E_Wasch.STOERUNG;
+    ASSERT NOT xPortalVor, 'Portal steht';
+    xQuittieren := TRUE; CYCLE;
+    ASSERT PLC_PRG.eSchritt = E_Wasch.STOERUNG, 'Quittieren erst ohne Person';
+    xLichtschranke := FALSE; CYCLE;
+    ASSERT PLC_PRG.eSchritt = E_Wasch.BEREIT;
+END_TEST

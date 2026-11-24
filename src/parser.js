@@ -3,6 +3,7 @@
   'use strict';
   const { STError } = ST;
 
+  const BLOCK_END = { IF: 'END_IF', CASE: 'END_CASE', FOR: 'END_FOR', WHILE: 'END_WHILE', REPEAT: 'END_REPEAT' };
   const VAR_KINDS = ['VAR', 'VAR_INPUT', 'VAR_OUTPUT', 'VAR_IN_OUT', 'VAR_TEMP', 'VAR_GLOBAL', 'VAR_EXTERNAL', 'VAR_STAT'];
 
   class Parser {
@@ -43,14 +44,61 @@
     // ---------- Dateiebene ----------
     parseFile() {
       const file = { globals: [], types: [], pous: [] };
+      let last = null;
       while (this.t.type !== 'eof') {
         if (this.isKw('VAR_GLOBAL')) file.globals.push(this.parseVarSection());
         else if (this.isKw('TYPE')) file.types.push(...this.parseTypeBlock());
-        else if (this.isKw('PROGRAM') || this.isKw('FUNCTION_BLOCK') || this.isKw('FUNCTION')) file.pous.push(this.parsePou());
+        else if (this.isKw('PROGRAM') || this.isKw('FUNCTION_BLOCK') || this.isKw('FUNCTION')) { last = this.parsePou(); file.pous.push(last); }
+        else if (this.isKw('METHOD') || this.isKw('ACTION')) {
+          // Methoden/Aktionen nach END_FUNCTION_BLOCK gehören zum Baustein davor (CODESYS-/TwinCAT-Textexport)
+          const t = this.t;
+          const m = this.isKw('METHOD') ? this.parseMethod() : this.parseAction();
+          let owner = last;
+          if (m.owner) owner = file.pous.find(p => p.name === m.owner) || null;
+          if (!owner || owner.kind === 'FUNCTION') throw this.err(`${t.value} '${m.display}' gehört zu keinem FUNCTION_BLOCK/PROGRAM`, t);
+          (m.kind === 'METHOD' ? owner.methods : owner.actions).push(m);
+        }
+        else if (this.t.type === 'ident' && (this.t.value === 'INTERFACE' || this.t.value === 'PROPERTY')) {
+          const t = this.next();
+          // Schnittstellen enthalten nur Signaturen – überspringen; Eigenschaften werden nicht unterstützt
+          if (t.value === 'PROPERTY') throw this.err('PROPERTY wird vom Simulator nicht unterstützt', t);
+          while (this.t.type !== 'eof' && !(this.t.type === 'ident' && this.t.value === 'END_INTERFACE')) this.next();
+          this.next();
+        }
         else if (this.isOp(';')) this.next();
         else throw this.err(`PROGRAM, FUNCTION_BLOCK, FUNCTION, TYPE oder VAR_GLOBAL erwartet, gefunden '${this.t.text}'`);
       }
       return file;
+    }
+
+    skipModifiers() {
+      while (this.t.type === 'ident' && /^(PUBLIC|PRIVATE|PROTECTED|INTERNAL|FINAL|ABSTRACT)$/.test(this.t.value)) this.next();
+    }
+
+    parseMethod() {
+      const kw = this.expectKw('METHOD');
+      this.skipModifiers();
+      let nameTok = this.ident('Methodenname');
+      let owner = null;
+      if (this.isOp('.') && this.peek(1).type === 'ident') { this.next(); owner = nameTok.value; nameTok = this.next(); }
+      const m = { kind: 'METHOD', name: nameTok.value, display: nameTok.text, owner, line: kw.line, sections: [], body: [], retType: null };
+      if (this.acceptOp(':')) m.retType = this.parseTypeSpec(false);
+      this.acceptOp(';');
+      while (VAR_KINDS.includes(this.t.value) && this.t.type === 'kw') m.sections.push(this.parseVarSection());
+      m.body = this.parseStatements(['END_METHOD']);
+      this.expectKw('END_METHOD');
+      return m;
+    }
+
+    parseAction() {
+      const kw = this.expectKw('ACTION');
+      let nameTok = this.ident('Aktionsname');
+      let owner = null;
+      if (this.isOp('.') && this.peek(1).type === 'ident') { this.next(); owner = nameTok.value; nameTok = this.next(); }
+      this.acceptOp(':');
+      const body = this.parseStatements(['END_ACTION']);
+      this.expectKw('END_ACTION');
+      return { kind: 'ACTION', name: nameTok.value, display: nameTok.text, owner, line: kw.line, body };
     }
 
     parseTypeBlock() {
@@ -73,17 +121,35 @@
     parsePou() {
       const kindTok = this.next();
       const kind = kindTok.value;
+      this.skipModifiers();
       const nameTok = this.ident(`Name für ${kind}`);
-      const pou = { kind, name: nameTok.value, display: nameTok.text, line: nameTok.line, sections: [], body: [], retType: null };
+      const pou = { kind, name: nameTok.value, display: nameTok.text, line: nameTok.line, sections: [], body: [], retType: null, methods: [], actions: [], extends: null };
       if (kind === 'FUNCTION') {
         if (this.acceptOp(':')) pou.retType = this.parseTypeSpec(false);
       }
-      // CODESYS: EXTENDS / IMPLEMENTS ignorieren wir nicht stillschweigend
-      if (this.t.type === 'ident' && (this.t.value === 'EXTENDS' || this.t.value === 'IMPLEMENTS'))
-        throw this.err(`'${this.t.text}' (OOP) wird vom Simulator nicht unterstützt`);
+      // CODESYS-OOP: EXTENDS (Vererbung) und IMPLEMENTS (Schnittstellen, nur Signaturen)
+      for (;;) {
+        if (this.t.type === 'ident' && this.t.value === 'EXTENDS') {
+          this.next();
+          const b = this.ident('Basis-Baustein');
+          pou.extends = { name: b.value, display: b.text, line: b.line, col: b.col };
+        } else if (this.t.type === 'ident' && this.t.value === 'IMPLEMENTS') {
+          this.next();
+          do this.ident('Schnittstelle'); while (this.acceptOp(','));
+        } else break;
+      }
       while (VAR_KINDS.includes(this.t.value) && this.t.type === 'kw') pou.sections.push(this.parseVarSection());
       const endKw = 'END_' + kind;
-      pou.body = this.parseStatements([endKw]);
+      const inner = () => {
+        while (this.isKw('METHOD') || this.isKw('ACTION')) {
+          if (kind === 'FUNCTION') throw this.err(`${this.t.value} ist in einer FUNCTION nicht möglich`);
+          const m = this.isKw('METHOD') ? this.parseMethod() : this.parseAction();
+          (m.kind === 'METHOD' ? pou.methods : pou.actions).push(m);
+        }
+      };
+      inner();
+      pou.body = this.parseStatements([endKw, 'METHOD', 'ACTION']);
+      inner();
       this.expectKw(endKw);
       return pou;
     }
@@ -241,6 +307,8 @@
         catch (e) {
           if (!(e instanceof STError) || this.errors.length > 50) throw e;
           this.errors.push(e);
+          const st = this.toks[start];
+          if (st.type === 'kw' && BLOCK_END[st.value] && this.skipBlock(start)) continue;
           // Synchronisieren: bis hinter das nächste ';' oder zum Blockende springen
           if (this.p === start) this.next();
           while (this.t.type !== 'eof' && !this.isOp(';') && !(this.t.type === 'kw' && /^END_|^(ELSE|ELSIF|UNTIL)$/.test(this.t.value))) this.next();
@@ -248,6 +316,27 @@
         }
       }
       return list;
+    }
+
+    // Fehler im Kopf von IF/CASE/FOR/WHILE/REPEAT: ganzen Block bis zum passenden END_… überspringen,
+    // damit keine Folgefehler entstehen
+    skipBlock(start) {
+      const stack = [];
+      for (let k = start; k < this.toks.length; k++) {
+        const t = this.toks[k];
+        if (t.type === 'eof') return false;
+        if (t.type !== 'kw') continue;
+        if (BLOCK_END[t.value]) stack.push(BLOCK_END[t.value]);
+        else if (t.value === stack[stack.length - 1]) {
+          stack.pop();
+          if (!stack.length) {
+            this.p = k + 1;
+            this.acceptOp(';');
+            return true;
+          }
+        }
+      }
+      return false;
     }
 
     looksLikeCaseLabel() {
@@ -342,6 +431,13 @@
         this.expectOp(';');
         return { s: 'assign', target: lhs, value, line: t.line, col: t.col };
       }
+      // CODESYS: x S= Bedingung;  x R= Bedingung;
+      if (this.t.type === 'ident' && (this.t.value === 'S' || this.t.value === 'R') && this.peek(1).type === 'op' && this.peek(1).value === '=') {
+        const set = this.next().value === 'S'; this.next();
+        const value = this.parseExpr();
+        this.expectOp(';');
+        return { s: 'setreset', set, target: lhs, value, line: t.line, col: t.col };
+      }
       if (lhs.e === 'call') {
         this.expectOp(';');
         return { s: 'call', call: lhs, line: t.line, col: t.col };
@@ -425,6 +521,7 @@
     parseFor() {
       const t = this.next();
       const v = this.ident('Laufvariable');
+      if (this.isOp('.') || this.isOp('[')) throw this.err('Die FOR-Laufvariable muss eine einfache Variable sein (z.B. i), kein Element oder Feld');
       this.expectOp(':=');
       const from = this.parseExpr();
       this.expectKw('TO');
@@ -513,7 +610,7 @@
           while (this.acceptOp(',')) idx.push(this.parseExpr());
           this.expectOp(']');
           x = { e: 'index', obj: x, idx, line: t.line, col: t.col };
-        } else if (this.isOp('(') && (x.e === 'id' || x.e === 'member' || x.e === 'index')) {
+        } else if (this.isOp('(') && (x.e === 'id' || x.e === 'member' || x.e === 'index' || x.e === 'super')) {
           this.next();
           const args = [];
           if (!this.isOp(')')) {
@@ -536,6 +633,7 @@
           this.expectOp(')');
           x = { e: 'call', fn: x, args, line: x.line, col: x.col };
         } else if (this.isOp('^')) {
+          if (x.e === 'id' && (x.name === 'THIS' || x.name === 'SUPER')) { this.next(); x = { e: x.name === 'THIS' ? 'this' : 'super', display: x.display + '^', line: x.line, col: x.col }; continue; }
           throw this.err('Pointer-Dereferenzierung (^) wird nicht unterstützt');
         } else break;
       }
@@ -558,7 +656,7 @@
           const v = this.next();
           if (v.type === 'int' || v.type === 'real') return { e: 'lit', v: neg ? -v.value : v.value, t: t.value, line: t.line, col: t.col };
           if (v.type === 'kw' && (v.value === 'TRUE' || v.value === 'FALSE')) return { e: 'lit', v: v.value === 'TRUE', t: t.value, line: t.line, col: t.col };
-          if (v.type === 'ident') return { e: 'enumval', type: t.value, name: v.value, display: v.text, line: t.line, col: t.col };
+          if (v.type === 'ident') return { e: 'enumval', type: t.value, typeDisplay: t.text.replace(/#$/, ''), name: v.value, display: v.text, line: t.line, col: t.col };
           if (v.type === 'string') return { e: 'lit', v: v.value, t: t.value, line: t.line, col: t.col };
           throw this.err(`Literal nach '${t.text}' erwartet`, lt);
         }
@@ -574,8 +672,13 @@
             return x;
           }
           break;
-        case 'address':
-          throw this.err('Direkte Adressen (%I/%Q/%M) im Code werden nicht unterstützt – bitte Variable mit AT deklarieren');
+        case 'address': {
+          // direkte Adresse wie %IX0.0 – wird beim Übersetzen der Variablen mit dieser Adresse zugeordnet
+          this.next();
+          const a = t.value.toUpperCase();
+          if (!/^%[IQM][XBWDL]?\d+(\.\d+)?$/.test(a)) throw this.err(`Ungültige Adresse '${t.text}'`, t);
+          return { e: 'id', name: a, display: t.text, addr: true, line: t.line, col: t.col };
+        }
       }
       if (t.type === 'eof') throw this.err('Unerwartetes Dateiende im Ausdruck');
       throw this.err(`Ausdruck erwartet, gefunden '${t.text}'`);

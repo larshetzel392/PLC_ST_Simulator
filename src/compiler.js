@@ -32,7 +32,9 @@
     get hasErrors() { return this.diags.some(d => d.kind === 'error'); }
 
     suggest(name, candidates) {
-      let best = null, bd = 3;
+      // kurze Namen (E9, x1): nur bei einem Zeichen Unterschied vorschlagen
+      let best = null, bd = name.length <= 3 ? 2 : name.length <= 5 ? 2 : 3;
+      if (name.length <= 3) candidates = candidates.filter(c => Math.abs(c.length - name.length) <= 1);
       for (const c of candidates) {
         const d = levenshtein(name, c);
         if (d < bd) { bd = d; best = c; }
@@ -57,7 +59,7 @@
       for (const [name, def] of Object.entries(T.FBS)) {
         const vars = new Map();
         for (const [vn, sec, tn] of def.vars)
-          vars.set(vn, { name: vn, display: vn, section: sec, type: T.ELEM[tn], init: def.init && def.init[vn] !== undefined ? def.init[vn] : undefined, hidden: vn.startsWith('_') });
+          vars.set(vn, { name: vn, display: vn, section: sec, type: T.ELEM[tn], init: def.init && def.init[vn] !== undefined ? def.init[vn] : undefined, hidden: vn.startsWith('_'), plcWrites: sec === 'VAR_OUTPUT' });
         const pou = { kind: 'FUNCTION_BLOCK', name, display: name, builtin: true, native: def.run, vars, file: null };
         pou.type = this.makePouType(pou);
         this.pous.set(name, pou);
@@ -80,6 +82,9 @@
 
     // ---------- Aufbau ----------
     build() {
+      // 0) Fehlendes ergänzen (nicht deklarierte Variablen, unbekannte Bausteine …)
+      try { this.inferMissing(); }
+      catch (e) { if (!(e instanceof Error)) throw e; if (globalThis.ST_DEBUG) globalThis.ST_DEBUG(e); this.warn('Vorlauf für fehlende Deklarationen übersprungen: ' + e.message, null, this.files[0] && this.files[0].file); }
       // 1) Typen registrieren
       for (const f of this.files) {
         this.curFile = f.file;
@@ -97,9 +102,17 @@
             this.error(old && old.builtin ? `'${p.display}' ist ein Standard-Baustein und kann nicht neu definiert werden` : `'${p.display}' ist mehrfach definiert`, p);
             continue;
           }
-          const pou = { kind: p.kind, name: p.name, display: p.display, ast: p, file: f.file, role: f.role, vars: new Map(), inputs: [], calls: new Set(), line: p.line };
+          const pou = { kind: p.kind, name: p.name, display: p.display, ast: p, file: f.file, role: f.role, vars: new Map(), inputs: [], calls: new Set(), line: p.line, stub: !!p.stub, methods: new Map(), actions: new Map() };
           pou.type = this.makePouType(pou);
           this.pous.set(p.name, pou);
+          for (const a of p.actions || []) {
+            if (pou.actions.has(a.name)) { this.error(`Aktion '${a.display}' ist mehrfach definiert`, a); continue; }
+            pou.actions.set(a.name, { name: a.name, display: a.display, ast: a, owner: pou, line: a.line });
+          }
+          for (const m of p.methods || []) {
+            if (pou.methods.has(m.name)) { this.error(`Methode '${m.display}' ist mehrfach definiert`, m); continue; }
+            pou.methods.set(m.name, { kind: 'METHOD', name: m.name, display: m.display, ast: m, owner: pou, vars: new Map(), inputs: [], line: m.line, file: f.file });
+          }
         }
       }
       // 3) Typen auflösen
@@ -115,35 +128,71 @@
           }
         }
       }
-      // 5) Variablen der POUs
-      for (const pou of this.pous.values()) {
-        if (pou.builtin) continue;
+      // 5) Variablen der POUs (Basis-Bausteine bei EXTENDS zuerst)
+      const done = new Set();
+      const setup = (pou, chain) => {
+        if (done.has(pou.name) || pou.builtin) return;
+        done.add(pou.name);
         this.curFile = pou.file;
+        if (pou.ast.extends) {
+          const b = this.pous.get(pou.ast.extends.name);
+          if (!b || b.builtin || b.kind !== 'FUNCTION_BLOCK' || pou.kind !== 'FUNCTION_BLOCK') this.error(`EXTENDS '${pou.ast.extends.display}': ${!b ? 'Baustein unbekannt' : 'nur zwischen eigenen FUNCTION_BLOCKs möglich'}`, pou.ast.extends);
+          else if (chain.includes(b.name)) this.error(`Zyklische Vererbung über '${b.display}'`, pou.ast.extends);
+          else {
+            setup(b, chain.concat([pou.name]));
+            pou.base = b;
+            for (const [k, v] of b.vars) pou.vars.set(k, v);
+            pou.inputs.push(...b.inputs);
+            for (const [k, a] of b.actions) if (!pou.actions.has(k)) pou.actions.set(k, a);
+            for (const [k, m] of b.methods) if (!pou.methods.has(k)) pou.methods.set(k, m);
+            this.curFile = pou.file;
+          }
+        }
         if (pou.kind === 'FUNCTION') {
           pou.retType = pou.ast.retType ? this.resolveTypeSpec(pou.ast.retType) : T.VOID;
           if (pou.retType && pou.retType.k === 'fb') this.error('Funktionen können keinen FB zurückgeben', pou.ast);
         }
         this.constScope = pou.vars;
-        for (const sec of pou.ast.sections) {
-          if (sec.kind === 'VAR_GLOBAL') { this.error('VAR_GLOBAL ist innerhalb eines Bausteins nicht erlaubt', sec); continue; }
-          if (pou.kind === 'FUNCTION' && sec.kind === 'VAR_OUTPUT') { /* erlaubt (CODESYS) */ }
-          for (const v of sec.vars) {
-            if (pou.vars.has(v.name)) { this.error(`Variable '${v.display}' ist in '${pou.display}' mehrfach deklariert`, v); continue; }
-            if (sec.kind === 'VAR_EXTERNAL') {
-              if (!this.globals.has(v.name)) this.error(`VAR_EXTERNAL '${v.display}' hat keine globale Variable`, v);
-              continue;
+        const declare = (target, sections, inputs, owner) => {
+          for (const sec of sections) {
+            if (sec.kind === 'VAR_GLOBAL') { this.error('VAR_GLOBAL ist innerhalb eines Bausteins nicht erlaubt', sec); continue; }
+            for (const v of sec.vars) {
+              if (target.has(v.name)) {
+                const inBase = target === pou.vars && pou.base && pou.base.vars.has(v.name);
+                this.error(inBase ? `Variable '${v.display}' ist bereits im Basis-Baustein '${pou.base.display}' deklariert` : `Variable '${v.display}' ist in '${owner}' mehrfach deklariert`, v);
+                continue;
+              }
+              if (sec.kind === 'VAR_EXTERNAL') {
+                if (!this.globals.has(v.name)) this.error(`VAR_EXTERNAL '${v.display}' hat keine globale Variable`, v);
+                continue;
+              }
+              const info = this.declVar(v, sec, pou.file, pou);
+              if (pou.stub) info.stub = true;
+              if (info.type && info.type.k === 'prog') this.error(`Programm '${info.type.display}' kann nicht instanziert werden`, v);
+              if (info.type && info.type.k === 'fb' && info.type.pou === pou) { this.error(`FB '${pou.display}' kann sich nicht selbst enthalten`, v); info.type = T.ELEM.BOOL; }
+              target.set(v.name, info);
+              if (sec.kind === 'VAR_INPUT' || sec.kind === 'VAR_IN_OUT') inputs.push(v.name);
             }
-            const info = this.declVar(v, sec, pou.file, pou);
-            if (info.type && info.type.k === 'prog') this.error(`Programm '${info.type.display}' kann nicht instanziert werden`, v);
-            if (info.type && info.type.k === 'fb' && info.type.pou === pou) { this.error(`FB '${pou.display}' kann sich nicht selbst enthalten`, v); info.type = T.ELEM.BOOL; }
-            pou.vars.set(v.name, info);
-            if (sec.kind === 'VAR_INPUT' || sec.kind === 'VAR_IN_OUT') pou.inputs.push(v.name);
           }
+        };
+        declare(pou.vars, pou.ast.sections, pou.inputs, pou.display);
+        for (const m of pou.methods.values()) {
+          if (m.owner !== pou) continue;
+          m.retType = m.ast.retType ? this.resolveTypeSpec(m.ast.retType) : T.VOID;
+          this.constScope = new Map([...pou.vars, ...m.vars]);
+          declare(m.vars, m.ast.sections, m.inputs, pou.display + '.' + m.display);
+          if (m.retType !== T.VOID) m.vars.set(m.name, { name: m.name, display: m.display, section: 'RETURN', type: m.retType, line: m.line });
+          m.type = { k: 'fb', name: pou.name + '.' + m.name, display: m.display, pou: m, fields: m.vars, makeInstance: () => {
+            const o = {};
+            for (const v of m.vars.values()) o[v.name] = v.init !== undefined ? T.deepCopy(v.init) : T.defaultValue(v.type);
+            return o;
+          } };
         }
         this.constScope = null;
         if (pou.kind === 'FUNCTION' && pou.retType !== T.VOID)
           pou.vars.set(pou.name, { name: pou.name, display: pou.display, section: 'RETURN', type: pou.retType, line: pou.line });
-      }
+      };
+      for (const pou of this.pous.values()) setup(pou, []);
       // Instanz-Rekursion (FB A enthält B enthält A) erkennen
       for (const pou of this.pous.values()) if (!pou.builtin) this.checkRecursion(pou, []);
       if (this.hasErrors) return false;
@@ -152,25 +201,33 @@
         if (pou.builtin) continue;
         this.curFile = pou.file;
         const scope = { pou, file: pou.file, kind: 'pou' };
-        pou.body = this.compileBlock(pou.ast.body, scope);
+        // abgeleiteter FB ohne eigenen Code führt den Code der Basis aus
+        if (pou.base && !pou.ast.body.length) pou.inheritBody = true;
+        else pou.body = this.compileBlock(pou.ast.body, scope);
+        for (const a of pou.actions.values()) if (a.owner === pou) a.body = this.compileBlock(a.ast.body, scope);
+        for (const m of pou.methods.values()) if (m.owner === pou) m.body = this.compileBlock(m.ast.body, { pou, method: m, file: pou.file, kind: 'pou' });
         this.checkUnused(pou);
       }
+      for (const pou of this.pous.values()) if (pou.inheritBody) { let b = pou.base; while (b.inheritBody) b = b.base; pou.body = b.body; }
       return !this.hasErrors;
     }
 
+    // Gibt den Baustein zurück, an dem sich ein Instanz-Kreis schließt (oder null).
+    // Gemeldet wird nur bei Bausteinen, die selbst im Kreis liegen.
     checkRecursion(pou, stack) {
-      if (stack.includes(pou)) return true;
+      if (stack.includes(pou)) return pou;
       for (const v of pou.vars.values()) {
         let t = v.type;
         while (t && t.k === 'array') t = t.elem;
         if (t && t.k === 'fb' && !t.pou.builtin) {
-          if (this.checkRecursion(t.pou, stack.concat([pou]))) {
-            if (stack.length === 0) this.error(`Rekursive Instanzierung: '${pou.display}' enthält sich selbst über '${t.display}'`, v);
-            return stack.length > 0;
+          const hit = this.checkRecursion(t.pou, stack.concat([pou]));
+          if (hit) {
+            if (stack.length === 0 && hit === pou) this.error(`Rekursive Instanzierung: '${pou.display}' enthält sich selbst über '${t.display}'`, v);
+            return hit === pou ? null : hit;
           }
         }
       }
-      return false;
+      return null;
     }
 
     checkUnused(pou) {
@@ -393,6 +450,7 @@
 
     // ---------- Namensauflösung ----------
     lookup(name, scope) {
+      if (scope.method && scope.method.vars.has(name)) return { where: 'mlocal', info: scope.method.vars.get(name) };
       if (scope.locals && scope.locals.has(name)) return { where: 'test', info: scope.locals.get(name) };
       if (scope.pou && scope.pou.vars.has(name)) return { where: 'local', info: scope.pou.vars.get(name) };
       if (scope.pou && scope.pou.kind === 'FUNCTION' && name === scope.pou.name) return { where: 'local', info: scope.pou.vars.get(name) };
@@ -412,8 +470,10 @@
     }
 
     allNames(scope) {
-      const out = [...this.globals.keys(), ...this.pous.keys(), ...this.enumValues.keys()];
+      // Bausteintypen (TON, TP …) sind keine sinnvollen Vorschläge für Variablen
+      const out = [...this.globals.keys(), ...[...this.pous.values()].filter(p => p.kind !== 'FUNCTION_BLOCK').map(p => p.name), ...this.enumValues.keys()];
       if (scope.pou) out.push(...scope.pou.vars.keys());
+      if (scope.method) out.push(...scope.method.vars.keys());
       if (scope.locals) out.push(...scope.locals.keys());
       return out;
     }

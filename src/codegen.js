@@ -72,7 +72,10 @@
     const r = ~BigInt.asUintN(64, BigInt(x));
     return Number(t.signed ? BigInt.asIntN(64, r) : BigInt.asUintN(64, r));
   }
-  function getBit(v, b) { if (v < 0) v += 2 ** 64; return Math.floor(v / 2 ** b) % 2 === 1; }
+  function getBit(v, b) {
+    if (b < 31 && v >= -2147483648 && v <= 4294967295) return ((v >> b) & 1) === 1;   // Zweierkomplement, auch negativ
+    return ((BigInt.asUintN(64, BigInt(Math.trunc(v))) >> BigInt(b)) & 1n) === 1n;
+  }
   function setBit(v, b, on, t) {
     const cur = getBit(v, b);
     if (cur === !!on) return v;
@@ -101,6 +104,10 @@
       case 'member': return this.refMember(e, scope);
       case 'index': return this.refIndex(e, scope);
       case 'bit': return this.refBit(e, scope);
+      case 'this':
+        if (!scope.pou || scope.pou.kind !== 'FUNCTION_BLOCK') { this.error('THIS^ ist nur in einem FUNCTION_BLOCK möglich', e); return null; }
+        return { t: scope.pou.type, get: c => c.self, isThis: true };
+      case 'super': this.error('SUPER^ nur als Aufruf SUPER^() oder SUPER^.Methode() möglich', e); return null;
     }
     return null;
   };
@@ -110,9 +117,13 @@
     const ref = { t: info.type, info };
     // Geforcte Variablen (o.__f[K]) werden vom Programm nicht überschrieben – wie in CODESYS
     if (base === 'self') { ref.get = c => c.self[K]; ref.set = (c, v) => { const o = c.self; if (!(o.__f && o.__f[K])) o[K] = co(v); }; ref.loc = c => [c.self, K]; }
+    else if (base === 'M') { ref.get = c => c.M[K]; ref.set = (c, v) => { c.M[K] = co(v); }; ref.loc = c => [c.M, K]; }
     else if (base === 'G') { ref.get = c => c.G[K]; ref.set = (c, v) => { const o = c.G; if (!(o.__f && o.__f[K])) o[K] = co(v); }; ref.loc = c => [c.G, K]; }
     else { const PN = base; ref.get = c => c.P[PN][K]; ref.set = (c, v) => { const o = c.P[PN]; if (!(o.__f && o.__f[K])) o[K] = co(v); }; ref.loc = c => [c.P[PN], K]; }
-    if (info.constant) ref.readonly = `'${info.display}' ist eine Konstante`;
+    if (info.constant) {
+      ref.readonly = `'${info.display}' ist eine Konstante`;
+      if (info.init !== undefined && (info.type.k === 'elem' || info.type.k === 'enum')) ref.constVal = info.init;
+    }
     return ref;
   };
 
@@ -123,6 +134,7 @@
       case 'test': case 'local':
         this.markUsed(lk.info);
         return this.varRef(e.name, lk.info, 'self');
+      case 'mlocal': this.markUsed(lk.info); return this.varRef(e.name, lk.info, 'M');
       case 'global': this.markUsed(lk.info); return this.varRef(e.name, lk.info, 'G');
       case 'fallback': this.markUsed(lk.info); return this.varRef(e.name, lk.info, lk.pou.name);
       case 'prog': {
@@ -174,7 +186,7 @@
     this.markUsed(f);
     const K = e.name, bget = base.get, co = coercer(f.type);
     const ref = { t: f.type, info: f, get: c => bget(c)[K], set: (c, v) => { const o = bget(c); if (!(o.__f && o.__f[K])) o[K] = co(v); }, loc: c => [bget(c), K] };
-    if (bt.k === 'fb' && scope.kind === 'pou') {
+    if (bt.k === 'fb' && scope.kind === 'pou' && !base.isThis) {
       if (f.section === 'VAR_OUTPUT') ref.readonly = `Ausgang '${e.display}' von '${bt.display}' kann nicht von außen beschrieben werden`;
       if (f.section === 'VAR' || f.section === 'VAR_STAT') { this.error(`'${e.display}' ist eine interne Variable von '${bt.display}' und von außen nicht zugreifbar`, e); }
     }
@@ -404,10 +416,45 @@
   };
 
   // ---------- Aufrufe ----------
+  // Aktion oder Methode eines Bausteins suchen
+  function memberProc(pou, name) {
+    if (!pou || !pou.actions) return null;
+    if (pou.methods.has(name)) return { m: pou.methods.get(name) };
+    if (pou.actions.has(name)) return { a: pou.actions.get(name) };
+    return null;
+  }
+
   P.compileCall = function (e, scope) {
     const fnE = e.fn;
+    if (fnE.e === 'super') {
+      const b = scope.pou && scope.pou.base;
+      if (!b) { this.error('SUPER^() ohne Basis-Baustein (EXTENDS)', e); return null; }
+      return { t: T.VOID, f: c => { b.body({ self: c.self, G: c.G, P: c.P, rt: c.rt }); } };
+    }
+    if (fnE.e === 'member' && (fnE.obj.e === 'super' || fnE.obj.e === 'this')) {
+      const owner = fnE.obj.e === 'super' ? scope.pou && scope.pou.base : scope.pou;
+      const mp = memberProc(owner, fnE.name);
+      if (mp) return mp.m ? this.callMethod(e, mp.m, c => c.self, scope) : this.callAction(e, mp.a, c => c.self);
+      if (fnE.obj.e === 'super') { this.error(`'${fnE.display}' gibt es im Basis-Baustein nicht`, fnE); return null; }
+    }
+    if (fnE.e === 'member' && fnE.obj.e !== 'super') {
+      // inst.Methode(...) / inst.Aktion() / Programm.Aktion()
+      const saved = this.diags.length;
+      const base = this.compileRef(fnE.obj, scope);
+      if (base && (base.t.k === 'fb' || base.t.k === 'prog')) {
+        const mp = memberProc(base.t.pou, fnE.name);
+        if (mp) {
+          if (scope.pou && base.special === 'prog') scope.pou.calls.add(base.t.pou.name);
+          const get = base.special === 'prog' ? (K => c => c.P[K])(base.t.pou.name) : base.get;
+          return mp.m ? this.callMethod(e, mp.m, get, scope) : this.callAction(e, mp.a, get);
+        }
+      }
+      this.diags.length = saved;
+    }
     if (fnE.e === 'id') {
       const lk = this.lookup(fnE.name, scope);
+      const own = !lk || lk.where === 'fbtype' || lk.where === 'prog' ? memberProc(scope.pou, fnE.name) : null;
+      if (own) return own.m ? this.callMethod(e, own.m, c => c.self, scope) : this.callAction(e, own.a, c => c.self);
       if (!lk) {
         if (fnE.name === 'TIME' && e.args.length === 0) return { t: E.TIME, f: c => c.rt.now };
         const bf = T.getFunc(fnE.name);
@@ -498,6 +545,58 @@
         run(inst, c);
         for (let i = 0; i < nIo; i++) { const p = inouts[i]; p.set(c, inst[p.K]); }
         for (let i = 0; i < nOut; i++) { const p = outs[i]; p.set(c, inst[p.K]); }
+      },
+    };
+  };
+
+  P.callAction = function (e, act, getInst) {
+    if (e.args.length) this.error(`Aktion '${act.display}' hat keine Parameter`, e);
+    return {
+      t: T.VOID,
+      f: c => {
+        const rt = c.rt;
+        if (++rt.depth > 64) rtErr(`Aufruftiefe überschritten (Rekursion?) in Aktion '${act.display}'`);
+        const saved = rt.loc;
+        act.body({ self: getInst(c), G: c.G, P: c.P, rt });
+        rt.loc = saved;
+        rt.depth--;
+      },
+    };
+  };
+
+  P.callMethod = function (e, m, getInst, scope) {
+    const params = m.inputs.map(n => m.vars.get(n));
+    const ins = [], outs = [];
+    let pos = 0;
+    for (const a of e.args) {
+      const f = a.name ? m.vars.get(a.name) : params[pos++];
+      if (!f || !['VAR_INPUT', 'VAR_OUTPUT', 'VAR_IN_OUT'].includes(f.section)) { this.error(a.name ? `Methode '${m.display}' hat keinen Parameter '${a.display}'` : `Zu viele Argumente für '${m.display}'`, a.value || a); continue; }
+      if (a.out || f.section === 'VAR_IN_OUT') {
+        const tgt = this.compileRef(a.value, scope);
+        if (!tgt || !tgt.set) { this.error(`Parameter '${f.display}' braucht eine Variable`, a.value); continue; }
+        if (f.section === 'VAR_IN_OUT') ins.push({ K: f.name, f: tgt.get, co: coercer(f.type) });
+        outs.push({ K: f.name, set: tgt.set });
+        continue;
+      }
+      const v = this.compileExpr(a.value, scope);
+      if (!v) continue;
+      this.checkAssign(f.type, v.t, a.value, `Parameter '${f.display}'`);
+      ins.push({ K: f.name, f: v.f, co: coercer(f.type) });
+    }
+    const make = m.type.makeInstance, RK = m.name, hasRet = m.retType !== T.VOID;
+    return {
+      t: m.retType,
+      f: c => {
+        const fr = make();
+        for (let i = 0; i < ins.length; i++) { const p = ins[i]; fr[p.K] = p.co(p.f(c)); }
+        const rt = c.rt;
+        if (++rt.depth > 64) rtErr(`Aufruftiefe überschritten (Rekursion?) in Methode '${m.display}'`);
+        const saved = rt.loc;
+        m.body({ self: getInst(c), M: fr, G: c.G, P: c.P, rt });
+        rt.loc = saved;
+        rt.depth--;
+        for (let i = 0; i < outs.length; i++) outs[i].set(c, fr[outs[i].K]);
+        return hasRet ? fr[RK] : undefined;
       },
     };
   };
@@ -636,11 +735,12 @@
     };
   };
 
+  // Jede Anweisung merkt sich den Zyklus, in dem sie zuletzt lief (für den Programmablaufplan)
   P.compileStmt = function (s, scope) {
     const loc = { line: s.line, col: s.col, file: scope.file };
     const inner = this.compileStmtInner(s, scope, loc);
     if (!inner) return null;
-    return c => { c.rt.loc = loc; return inner(c); };
+    return c => { c.rt.loc = loc; s.hit = c.rt.cyc; return inner(c); };
   };
 
   P.compileStmtInner = function (s, scope, loc) {
@@ -656,6 +756,16 @@
         this.markWrite(tgt, scope);
         const set = tgt.set, f = val.f;
         return c => { set(c, f(c)); return 0; };
+      }
+      case 'setreset': {
+        const tgt = this.compileRef(s.target, scope);
+        const val = this.compileExpr(s.value, scope);
+        if (!tgt || !val || !this.checkAssignTarget(tgt, s.target)) return null;
+        if (!T.isBool(tgt.t)) { this.error(`${s.set ? 'S=' : 'R='} braucht eine BOOL-Variable`, s.target); return null; }
+        if (!T.isBool(val.t)) { this.error(`Bedingung muss BOOL sein, nicht ${T.typeName(val.t)}`, s.value); return null; }
+        this.markWrite(tgt, scope);
+        const set = tgt.set, f = val.f, on = s.set;
+        return c => { if (f(c)) set(c, on); return 0; };
       }
       case 'call': {
         const call = this.compileCall(s.call, scope);
@@ -673,12 +783,10 @@
         }
         const elseB = s.elseBody ? this.compileBlock(s.elseBody, scope) : null;
         const n = conds.length;
-        if (n === 1) {
-          const c0 = conds[0], b0 = bodies[0];
-          return elseB ? (c => (c0(c) ? b0(c) : elseB(c))) : (c => (c0(c) ? b0(c) : 0));
-        }
+        // s.br: Index des zuletzt genommenen Zweigs (n = ELSE bzw. keiner)
         return c => {
-          for (let i = 0; i < n; i++) if (conds[i](c)) return bodies[i](c);
+          for (let i = 0; i < n; i++) if (conds[i](c)) { s.br = i; return bodies[i](c); }
+          s.br = n;
           return elseB ? elseB(c) : 0;
         };
       }
@@ -709,7 +817,8 @@
           const v = fsel(c);
           let i = map.get(v);
           if (i === undefined) for (const r of ranges) if (v >= r.lo && v <= r.hi) { i = r.idx; break; }
-          if (i !== undefined) return bodies[i](c);
+          if (i !== undefined) { s.br = i; return bodies[i](c); }
+          s.br = bodies.length;
           return elseB ? elseB(c) : 0;
         };
       }
@@ -723,6 +832,7 @@
         const sub = Object.assign({}, scope, { loopVars: (scope.loopVars || []).concat([s.v.name]), inLoop: true });
         const body = this.compileBlock(s.body, sub);
         if (!v || !from || !to || !by) return null;
+        this.markWrite(v, scope);
         const set = v.set, get = v.get, ff = from.f, ft = to.f, fb = by.f;
         return c => {
           const end = ft(c), step = fb(c);
@@ -825,8 +935,10 @@
           const a = this.compileExpr(ce.a, scope), b = this.compileExpr(ce.b, scope);
           if (a && b) detail = c => {
             const av = fmtValue(a.t, a.f(c)), bv = fmtValue(b.t, b.f(c));
-            if (a.constVal !== undefined) return `ist ${bv}`;
-            if (b.constVal !== undefined) return `ist ${av}`;
+            // die Seite, die kein reines Literal ist, ist der „Ist“-Wert
+            const lit = e => e.e === 'lit' || e.e === 'enumval' || (e.e === 'un' && e.x.e === 'lit') || (e.e === 'member' && a.constVal !== undefined && b.constVal !== undefined);
+            if (lit(ce.a) && !lit(ce.b)) return `ist ${bv}`;
+            if (lit(ce.b) && !lit(ce.a)) return `ist ${av}`;
             return `links ${av}, rechts ${bv}`;
           };
         }

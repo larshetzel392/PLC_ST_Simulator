@@ -59,9 +59,10 @@
     }
 
     cycle() {
+      this.notReady();
       if (this.fault) throw this.fault;
       const rt = this.rt;
-      rt.loops = 0; rt.depth = 0;
+      rt.loops = 0; rt.depth = 0; rt.cyc = this.cycleCount + 1;
       this.applyForces();
       try {
         for (const t of this.tasks) {
@@ -87,7 +88,10 @@
     }
     ctx() { return { self: {}, G: this.G, P: this.P, rt: this.rt }; }
 
+    notReady() { if (!this.ok) throw new ST.STError('Das Programm ist nicht übersetzt (Fehler beim Übersetzen)'); }
+
     resolve(path) {
+      this.notReady();
       if (this.refCache.has(path)) return this.refCache.get(path);
       const c = this.compiler;
       const saved = c.diags; c.diags = [];
@@ -110,6 +114,11 @@
     // Wert aus Text (ST-Literal/Ausdruck) parsen und typgerecht liefern
     parseValue(text, type) {
       const c = this.compiler;
+      // Eingabe-Komfort: 2,5 → 2.5 · 3s → T#3s · 1/0 → TRUE/FALSE
+      const raw = String(text).trim();
+      if (T.isBool(type) && /^[01]$/.test(raw)) text = raw === '1' ? 'TRUE' : 'FALSE';
+      else if (type.k === 'elem' && type.cat === 'real' && /^[-+]?\d+,\d+(e[-+]?\d+)?$/i.test(raw)) text = raw.replace(',', '.');
+      else if (T.isTime(type) && /^-?\d+([.,]\d+)?\s*(d|h|m|s|ms|us)\b/i.test(raw)) text = 'T#' + raw.replace(/\s+/g, '').replace(',', '.');
       const saved = c.diags; c.diags = [];
       try {
         const p = new ST.Parser(text);
@@ -120,7 +129,11 @@
         if (errs.length || !x) throw new ST.STError(errs.length ? errs[0].msg : `Ungültiger Wert '${text}'`);
         const chk = T.assignCheck(type, x.t);
         if (chk && chk.error) throw new ST.STError(chk.error);
-        return T.coerce(type, x.f(this.ctx()));
+        const v = x.f(this.ctx());
+        // Ganzzahl außerhalb des Bereichs nicht stillschweigend überlaufen lassen
+        if (type.k === 'elem' && type.cat === 'int' && !type.lit && typeof v === 'number' && Number.isInteger(v) && T.wrapInt(v, type) !== v)
+          throw new ST.STError(`${v} liegt außerhalb des Bereichs von ${type.name} (${T.wrapInt(type.signed ? 2 ** (type.bits - 1) : 0, type)} … ${T.wrapInt(type.signed ? 2 ** (type.bits - 1) - 1 : -1, type)})`);
+        return T.coerce(type, v);
       } finally { c.diags = saved; }
     }
     write(path, value) {

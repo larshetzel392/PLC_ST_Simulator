@@ -1,0 +1,14 @@
+TEST 'Station 1 läuft einmal durch'
+    xTeil1 := TRUE; xB2 := TRUE;
+    xStart := TRUE; CYCLE;
+    ASSERT PLC_PRG.st1.nSchritt = 10;
+    ASSERT xY1, 'Zylinder fährt aus';
+    xB2 := FALSE; xB1 := TRUE; CYCLE;
+    ASSERT PLC_PRG.st1.nSchritt = 20, 'relative Weiterschaltung +10';
+    xB1 := FALSE; xB2 := TRUE; CYCLE;
+    RUN_UNTIL PLC_PRG.st1.nSchritt = 40 TIMEOUT T#2s;
+    CYCLE;
+    ASSERT PLC_PRG.st1.xFertig, 'Fertigmeldung im Schritt 40';
+    xTeil1 := FALSE; CYCLE;
+    ASSERT PLC_PRG.st1.nSchritt = 0;
+END_TEST

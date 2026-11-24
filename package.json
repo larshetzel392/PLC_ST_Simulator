@@ -7,6 +7,6 @@
   "scripts": {
     "start": "node serve.js",
     "build": "node build.js",
-    "test": "node st-test.js examples/selftest/features.st examples/selftest/features.sttest; node st-test.js Saege_CODESYS.st Saege_Tests.sttest; node st-test.js Saege_CODESYS.st --model Saege_Anlage.st Saege_Integration.sttest"
+    "test": "node st-test.js examples/selftest/features.st examples/selftest/features.sttest; node st-test.js examples/selftest/oop.st examples/selftest/oop.sttest; node st-test.js examples/selftest/konformitaet.st examples/selftest/konformitaet.sttest; node st-test.js examples/selftest/standard_fbs.st examples/selftest/standard_fbs.sttest; node st-test.js examples/allgemein/Station.st examples/allgemein/Station.sttest; node st-test.js examples/allgemein/Waschanlage.st examples/allgemein/Waschanlage.sttest; node st-test.js Saege_CODESYS.st Saege_Tests.sttest; node st-test.js Saege_CODESYS.st --model Saege_Anlage.st Saege_Integration.sttest"
   }
 }

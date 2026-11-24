@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Lokaler Server für den ST Prüfstand:  node serve.js [port]
 //   /                 Oberfläche (wird bei Änderungen an src/ oder web/ neu gebaut)
-//   /api/files        .st/.sttest-Dateien im Projektordner
+//   /api/files        .st/.sttest/.exp/TwinCAT-Dateien im Projektordner
 //   /api/file/<name>  Datei lesen (GET) oder speichern (PUT)
 'use strict';
 const http = require('http');
@@ -31,7 +31,9 @@ function ensureBuilt() {
   }
 }
 
-// Nur .st/.sttest im Projektordner und in examples/, keine Pfade nach außen
+// Lesbar: ST-Quellen und Exporte; schreibbar nur .st/.sttest. Keine Pfade nach außen.
+const READ_EXT = /\.(st|sttest|exp|tcpou|tcgvl|tcdut)$/i;
+const WRITE_EXT = /\.(st|sttest)$/i;
 function listFiles() {
   const out = [];
   const walk = (dir, depth) => {
@@ -39,14 +41,14 @@ function listFiles() {
       if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'dist') continue;
       const p = path.join(dir, e.name);
       if (e.isDirectory() && depth < 3) walk(p, depth + 1);
-      else if (/\.(st|sttest)$/i.test(e.name)) out.push(path.relative(ROOT, p).split(path.sep).join('/'));
+      else if (READ_EXT.test(e.name)) out.push(path.relative(ROOT, p).split(path.sep).join('/'));
     }
   };
   walk(ROOT, 0);
   return out.sort();
 }
-function safePath(name) {
-  if (!/\.(st|sttest)$/i.test(name)) return null;
+function safePath(name, write) {
+  if (!(write ? WRITE_EXT : READ_EXT).test(name)) return null;
   const p = path.resolve(ROOT, name);
   if (!p.startsWith(ROOT + path.sep)) return null;
   return p;
@@ -59,6 +61,9 @@ const server = http.createServer((req, res) => {
     res.end(body);
   };
   try {
+    // nur über localhost erreichbar (schützt vor DNS-Rebinding fremder Webseiten)
+    const host = String(req.headers.host || '').replace(/:\d+$/, '');
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(host)) return send(403, 'Nur über localhost erreichbar');
     if (url.pathname === '/' || url.pathname === '/index.html') {
       ensureBuilt();
       return send(200, fs.readFileSync(DIST), 'text/html; charset=utf-8');
@@ -66,8 +71,8 @@ const server = http.createServer((req, res) => {
     if (url.pathname === '/api/files' && req.method === 'GET') return send(200, JSON.stringify(listFiles()), 'application/json');
     if (url.pathname.startsWith('/api/file/')) {
       const name = decodeURIComponent(url.pathname.slice('/api/file/'.length));
-      const p = safePath(name);
-      if (!p) return send(400, 'Nur .st- und .sttest-Dateien im Projektordner');
+      const p = safePath(name, req.method === 'PUT');
+      if (!p) return send(400, req.method === 'PUT' ? 'Speichern nur als .st/.sttest im Projektordner' : 'Nur ST-Dateien im Projektordner');
       if (req.method === 'GET') {
         if (!fs.existsSync(p)) return send(404, 'Datei nicht gefunden');
         return send(200, fs.readFileSync(p, 'utf8'));

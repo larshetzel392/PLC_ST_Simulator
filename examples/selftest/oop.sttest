@@ -1,0 +1,20 @@
+TEST 'Methode zählt über EXTENDS/SUPER^'
+    xTaster := TRUE;  CYCLE;
+    xTaster := FALSE; CYCLE;
+    ASSERT PLC_PRG.fb.iWert = 1;
+    ASSERT PLC_PRG.iRet = 1, 'Rückgabewert der Methode';
+    ASSERT NOT PLC_PRG.fb.xVoll;
+END_TEST
+
+TEST 'THIS^, S= und Aktion'
+VAR i : INT; END_VAR
+    FOR i := 1 TO 3 DO
+        xTaster := TRUE;  CYCLE;
+        xTaster := FALSE; CYCLE;
+    END_FOR
+    ASSERT PLC_PRG.fb.xVoll, 'Grenze 3 erreicht';
+    ASSERT xLampe, 'S= setzt die Lampe';
+    %IX0.1 := TRUE; CYCLE;
+    ASSERT PLC_PRG.fb.iWert = 0, 'Aktion Nullen';
+    ASSERT NOT xLampe, 'R= setzt zurück';
+END_TEST

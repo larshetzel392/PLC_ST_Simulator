@@ -1,0 +1,48 @@
+TEST 'TON'
+    xIn := TRUE; CYCLE;
+    ASSERT NOT PLC_PRG.ton1.Q; ASSERT PLC_PRG.ton1.ET = T#0ms, 'ET startet bei 0';
+    WAIT T#90ms; ASSERT NOT PLC_PRG.ton1.Q, 'nach 90 ms';
+    WAIT T#10ms; ASSERT PLC_PRG.ton1.Q, 'nach 100 ms';
+    ASSERT PLC_PRG.ton1.ET = T#100ms, 'ET bleibt bei PT';
+    WAIT T#1s; ASSERT PLC_PRG.ton1.ET = T#100ms;
+    xIn := FALSE; CYCLE; ASSERT NOT PLC_PRG.ton1.Q; ASSERT PLC_PRG.ton1.ET = T#0ms;
+END_TEST
+TEST 'TOF'
+    xIn := TRUE; CYCLE; ASSERT PLC_PRG.tof1.Q;
+    xIn := FALSE; CYCLE; ASSERT PLC_PRG.tof1.Q, 'hält nach';
+    WAIT T#90ms; ASSERT PLC_PRG.tof1.Q;
+    WAIT T#20ms; ASSERT NOT PLC_PRG.tof1.Q, 'nach 100 ms aus';
+END_TEST
+TEST 'TP'
+    xIn := TRUE; CYCLE; ASSERT PLC_PRG.tp1.Q;
+    xIn := FALSE; CYCLE; ASSERT PLC_PRG.tp1.Q, 'Puls läuft weiter';
+    xIn := TRUE; CYCLE; ASSERT PLC_PRG.tp1.Q, 'nicht nachtriggerbar';
+    WAIT T#100ms; ASSERT NOT PLC_PRG.tp1.Q, 'Puls zu Ende trotz IN';
+    xIn := FALSE; CYCLE; xIn := TRUE; CYCLE; ASSERT PLC_PRG.tp1.Q, 'neuer Puls';
+END_TEST
+TEST 'Flanken'
+    CYCLE; ASSERT PLC_PRG.nRt = 0;
+    xIn := TRUE; CYCLE; ASSERT PLC_PRG.nRt = 1;
+    CYCLE 5; ASSERT PLC_PRG.nRt = 1, 'nur einmal';
+    xIn := FALSE; CYCLE; ASSERT PLC_PRG.nFt = 1;
+    CYCLE; ASSERT PLC_PRG.nFt = 1;
+END_TEST
+TEST 'Zähler'
+    xCu := TRUE; CYCLE; xCu := FALSE; CYCLE;
+    xCu := TRUE; CYCLE; xCu := FALSE; CYCLE;
+    ASSERT PLC_PRG.ctu1.CV = 2; ASSERT NOT PLC_PRG.ctu1.Q;
+    xCu := TRUE; CYCLE; ASSERT PLC_PRG.ctu1.Q, 'CV >= PV';
+    xRes := TRUE; CYCLE; ASSERT PLC_PRG.ctu1.CV = 0; xRes := FALSE;
+    xLoad := TRUE; CYCLE; xLoad := FALSE; ASSERT PLC_PRG.ctd1.CV = 2;
+    xCd := TRUE; CYCLE; xCd := FALSE; CYCLE; xCd := TRUE; CYCLE; xCd := FALSE; CYCLE;
+    ASSERT PLC_PRG.ctd1.Q, 'CV <= 0';
+    xCd := TRUE; CYCLE;
+    ASSERT PLC_PRG.ctd1.CV = 0, 'CTD zählt nicht unter 0 (CODESYS)';
+END_TEST
+TEST 'SR/RS'
+    xS := TRUE; xR := TRUE; CYCLE;
+    ASSERT PLC_PRG.sr1.Q1, 'SR: Setzen dominant';
+    ASSERT NOT PLC_PRG.rs1.Q1, 'RS: Rücksetzen dominant';
+    xR := FALSE; CYCLE; ASSERT PLC_PRG.rs1.Q1;
+    xS := FALSE; CYCLE; ASSERT PLC_PRG.rs1.Q1 AND PLC_PRG.sr1.Q1, 'speichern';
+END_TEST

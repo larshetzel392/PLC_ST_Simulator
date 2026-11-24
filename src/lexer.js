@@ -20,6 +20,7 @@
     'CASE', 'END_CASE', 'FOR', 'TO', 'BY', 'DO', 'END_FOR',
     'WHILE', 'END_WHILE', 'REPEAT', 'UNTIL', 'END_REPEAT',
     'EXIT', 'CONTINUE', 'RETURN',
+    'METHOD', 'END_METHOD', 'ACTION', 'END_ACTION',
     'AND', 'OR', 'XOR', 'NOT', 'MOD', 'TRUE', 'FALSE', 'AND_THEN', 'OR_ELSE',
     // Test-DSL
     'TEST', 'END_TEST', 'SETUP', 'END_SETUP', 'CYCLE', 'WAIT', 'ASSERT', 'RUN_UNTIL', 'TIMEOUT', 'LOG',
